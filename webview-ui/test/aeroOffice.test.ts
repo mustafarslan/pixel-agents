@@ -447,6 +447,70 @@ test('a Task with no type, a type that matches nothing, or a near-miss stays sto
   assert.equal(os.aero.subagentStarted(1, 'missing', 'Subtask: code-reviewer'), false);
 });
 
+test('a project agent matches only a lead whose directoryName is its room; the owner agent matches any lead', () => {
+  const roomA = '0a1b2c3d4e5f';
+  const roomB = 'ffeeddccbbaa';
+  const os = build();
+  os.addAgent(1, 0, 0, DESK, true, roomA);
+  setAeroUpdate(
+    update({
+      agents: [
+        { name: 'Reviewer', slug: 'reviewer', room: roomB },
+        { name: 'Planner', slug: 'planner' },
+      ],
+    }),
+  );
+  run(os, MATRIX_EFFECT_DURATION + 0.5);
+  assert.deepEqual(
+    os.aero.snapshot().people.map((p) => [p.slug, p.room]),
+    [
+      ['reviewer', roomB],
+      ['planner', null],
+    ],
+  );
+  // The lead is in room A: the agent of room B stays stock, the owner's agent walks in.
+  const other = os.addSubagent(1, 'tool-1');
+  assert.equal(os.aero.subagentStarted(1, 'tool-1', 'Subtask: reviewer'), false);
+  assert.equal(os.characters.get(other)!.aeroHidden, undefined);
+  os.addSubagent(1, 'tool-2');
+  assert.equal(os.aero.subagentStarted(1, 'tool-2', 'Subtask: planner'), true);
+
+  // A lead in room B gets the project agent; a lead with no directoryName never does.
+  os.addAgent(2, 0, 0, undefined, true, roomB);
+  os.addAgent(3, 0, 0, undefined, true);
+  os.addSubagent(2, 'tool-3');
+  assert.equal(os.aero.subagentStarted(2, 'tool-3', 'Subtask: reviewer'), true);
+  os.removeSubagent(2, 'tool-3');
+  os.addSubagent(3, 'tool-4');
+  assert.equal(os.aero.subagentStarted(3, 'tool-4', 'Subtask: reviewer'), false);
+});
+
+test('a project agent of the same name in two rooms is two characters, each for its own room', () => {
+  const roomA = '0a1b2c3d4e5f';
+  const roomB = 'ffeeddccbbaa';
+  const os = build();
+  os.addAgent(1, 0, 0, DESK, true, roomA);
+  setAeroUpdate(
+    update({
+      agents: [
+        { name: 'Reviewer', slug: 'reviewer', room: roomA },
+        { name: 'Reviewer', slug: 'reviewer', room: roomB },
+      ],
+    }),
+  );
+  run(os, MATRIX_EFFECT_DURATION + 0.5);
+  assert.equal(os.aero.people.length, 2);
+  os.addSubagent(1, 'tool-1');
+  assert.equal(os.aero.subagentStarted(1, 'tool-1', 'Subtask: reviewer'), true);
+  assert.deepEqual(
+    os.aero.snapshot().people.map((p) => [p.room, p.away]),
+    [
+      [roomA, true],
+      [roomB, false],
+    ],
+  );
+});
+
 test('a configured character removed from the update while away shows the stock sprite again', () => {
   const os = build();
   lead(os);

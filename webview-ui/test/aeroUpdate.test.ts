@@ -110,6 +110,49 @@ test('at most eight agents; names capped at 40 and clean; slugs exact; no repeat
   assert.equal(parseAeroUpdate({ ...good(), agents: [{ name: 'a', slug: 'x', extra: 1 }] }), null);
 });
 
+test('a project agent carries its room: 12 lowercase hex, exact keys; the same slug may be in several rooms', () => {
+  const room = '0a1b2c3d4e5f';
+  const one = (agent: Record<string, unknown>) => ({ ...good(), agents: [agent] });
+  const withRoom = one({ name: 'Reviewer', slug: 'reviewer', room });
+  assert.deepEqual(parseAeroUpdate(withRoom), withRoom);
+  // Agents with and without a room can sit side by side.
+  const mixed = {
+    ...good(),
+    agents: [
+      { name: 'Reviewer', slug: 'reviewer', room },
+      { name: 'Reviewer', slug: 'reviewer', room: 'ffffffffffff' },
+      { name: 'Reviewer', slug: 'reviewer' },
+    ],
+  };
+  assert.deepEqual(parseAeroUpdate(mixed), mixed);
+  for (const bad of [
+    '',
+    '0A1B2C3D4E5F',
+    '0a1b2c3d4e5',
+    '0a1b2c3d4e5f0',
+    '0a1b2c3d4e5g',
+    '../0a1b2c3d4e',
+    'prruns',
+    5,
+    null,
+  ]) {
+    assert.equal(parseAeroUpdate(one({ name: 'n', slug: 'a', room: bad })), null, String(bad));
+  }
+  // The same slug in the same room twice, a room with no slug, and extra keys are rejected.
+  assert.equal(
+    parseAeroUpdate({
+      ...good(),
+      agents: [
+        { name: 'a', slug: 'x', room },
+        { name: 'b', slug: 'x', room },
+      ],
+    }),
+    null,
+  );
+  assert.equal(parseAeroUpdate(one({ name: 'n', room })), null);
+  assert.equal(parseAeroUpdate(one({ name: 'n', slug: 'a', room, extra: 1 })), null);
+});
+
 test('the agent type comes from "Subtask: <type>" only', () => {
   assert.equal(agentTypeFromStatus('Subtask: code-reviewer'), 'code-reviewer');
   assert.equal(agentTypeFromStatus('Subtask:   spaced  '), 'spaced');

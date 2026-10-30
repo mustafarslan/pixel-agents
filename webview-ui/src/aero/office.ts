@@ -73,6 +73,8 @@ export interface Route {
 
 export interface Person {
   slug: string;
+  /** The worktree room a project agent belongs to, or null (the owner's agents match any lead). */
+  room: string | null;
   name: string;
   ch: Character;
   /** The stock subagent character this one stands in for, while it is away. */
@@ -458,9 +460,12 @@ export class AeroOffice {
   }
 
   private reconcilePeople(update: AeroUpdate | null): void {
-    const wanted = new Map(update ? update.agents.map((a) => [a.slug, a.name]) : []);
+    const idOf = (slug: string, room: string | null): string => `${room ?? ''}/${slug}`;
+    const wanted = new Map(
+      update ? update.agents.map((a) => [idOf(a.slug, a.room ?? null), a.name]) : [],
+    );
     for (const person of this.people) {
-      const name = wanted.get(person.slug);
+      const name = wanted.get(idOf(person.slug, person.room));
       if (name === undefined) {
         if (person.ch.matrixEffect !== 'despawn') {
           this.unhide(person);
@@ -473,7 +478,12 @@ export class AeroOffice {
     }
     if (!update) return;
     for (const agent of update.agents) {
-      if (this.people.some((p) => p.slug === agent.slug && p.ch.matrixEffect !== 'despawn'))
+      const room = agent.room ?? null;
+      if (
+        this.people.some(
+          (p) => p.slug === agent.slug && p.room === room && p.ch.matrixEffect !== 'despawn',
+        )
+      )
         continue;
       const spot = this.freeLoungeTile();
       if (!spot) continue;
@@ -495,7 +505,7 @@ export class AeroOffice {
       ch.tileRow = spot.row;
       ch.wanderTimer = 1 + this.rng() * 4;
       startMatrixEffect(ch, 'spawn');
-      this.people.push({ slug: agent.slug, name: agent.name, ch, subId: null });
+      this.people.push({ slug: agent.slug, room, name: agent.name, ch, subId: null });
     }
   }
 
@@ -548,14 +558,18 @@ export class AeroOffice {
   subagentStarted(parentId: number, parentToolId: string, status: unknown): boolean {
     const type = agentTypeFromStatus(status);
     if (type === null) return false;
-    const person = this.people.find(
-      (p) => p.slug === type && p.ch.matrixEffect === null && p.subId === null,
-    );
+    const lead = this.os.characters.get(parentId);
+    if (!lead) return false;
+    // A project agent only for a lead in its room (preferred); the owner's agents (no room) for any lead.
+    const free = (p: Person): boolean =>
+      p.slug === type && p.ch.matrixEffect === null && p.subId === null;
+    const person =
+      this.people.find((p) => free(p) && p.room !== null && p.room === lead.directoryName) ??
+      this.people.find((p) => free(p) && p.room === null);
     if (!person) return false;
     const subId = this.os.getSubagentId(parentId, parentToolId);
     const sub = subId === null ? undefined : this.os.characters.get(subId);
-    const lead = this.os.characters.get(parentId);
-    if (subId === null || !sub || !lead) return false;
+    if (subId === null || !sub) return false;
     sub.aeroHidden = true;
     person.subId = subId;
     const ch = person.ch;
@@ -645,6 +659,7 @@ export class AeroOffice {
       })),
       people: this.people.map((p) => ({
         slug: p.slug,
+        room: p.room,
         name: p.name,
         id: p.ch.id,
         col: p.ch.tileCol,
@@ -678,6 +693,7 @@ export interface AeroSnapshot {
   }>;
   people: Array<{
     slug: string;
+    room: string | null;
     name: string;
     id: number;
     col: number;

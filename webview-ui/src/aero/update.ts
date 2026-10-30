@@ -16,6 +16,11 @@ export interface AeroAgent {
   name: string;
   /** What a SubagentStart's `agent_type` must equal, exactly. */
   slug: string;
+  /**
+   * The worktree's room (its slug, the stub folder name) for a project agent: it is matched only for a lead whose
+   * `directoryName` is this. Absent for the owner's agents, which match any lead.
+   */
+  room?: string;
 }
 
 export interface AeroMeeting {
@@ -36,6 +41,7 @@ export interface AeroUpdate {
 
 const KEYS = ['agents', 'inbox', 'lounge', 'lunch', 'meeting'];
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
+const ROOM_RE = /^[0-9a-f]{12}$/;
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 /** Control, format (bidi marks too), and line or paragraph separator characters. */
 const FORBIDDEN_RE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
@@ -83,13 +89,22 @@ export function parseAeroUpdate(raw: unknown): AeroUpdate | null {
   const parsedAgents: AeroAgent[] = [];
   const seen = new Set<string>();
   for (const agent of agents) {
-    if (!isPlainObject(agent) || !hasKeys(agent, ['name', 'slug'])) return null;
+    if (!isPlainObject(agent)) return null;
+    const withRoom = hasKeys(agent, ['name', 'room', 'slug']);
+    if (!withRoom && !hasKeys(agent, ['name', 'slug'])) return null;
     const name = cleanText(agent.name, MAX_NAME_CHARS);
     if (name === null) return null;
     if (typeof agent.slug !== 'string' || !SLUG_RE.test(agent.slug)) return null;
-    if (seen.has(agent.slug)) return null;
-    seen.add(agent.slug);
-    parsedAgents.push({ name, slug: agent.slug });
+    if (withRoom && (typeof agent.room !== 'string' || !ROOM_RE.test(agent.room))) return null;
+    // One character per slug and room: a project's agent is in each of its worktrees.
+    const id = `${withRoom ? agent.room : ''}/${agent.slug}`;
+    if (seen.has(id)) return null;
+    seen.add(id);
+    parsedAgents.push(
+      withRoom
+        ? { name, slug: agent.slug, room: agent.room as string }
+        : { name, slug: agent.slug },
+    );
   }
 
   return { lunch, meeting: parsedMeeting, inbox, agents: parsedAgents, lounge };
