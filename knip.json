@@ -12,6 +12,7 @@
   ],
   "ignoreExportsUsedInFile": true,
   "ignore": [
+    "webview-ui/src/aero/fx/**",
     "core/src/index.ts",
     "server/src/providers/hook/claude/hooks/claude-hook.ts",
     "webview-ui/src/office/components/index.ts",

@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 
 import { afterEach, beforeEach, test } from 'vitest';
 
-import { installAeroOffice, postToAero } from '../src/aero/install.js';
+import { handleWallTap, installAeroOffice, postToAero } from '../src/aero/install.js';
 import { getAeroUpdate, resetAeroUpdate } from '../src/aero/office.js';
 
 const g = globalThis as unknown as { window?: Record<string, unknown> };
@@ -58,4 +58,20 @@ test("a click is posted only to Aero's handler, and only the two known types", (
   assert.deepEqual(posted, [{ type: 'openInbox' }, { type: 'openCalendar' }]);
   g.window!.webkit = { messageHandlers: { aero: {} } };
   assert.equal(postToAero('openInbox'), false, 'a handler without postMessage');
+});
+
+test("a wall tap tells Aero only when the click is trusted; a script's dispatched click does nothing", () => {
+  const posted: unknown[] = [];
+  g.window!.webkit = { messageHandlers: { aero: { postMessage: (m: unknown) => posted.push(m) } } };
+  const office = {
+    aero: { wallHitAt: (x: number) => (x < 10 ? ('openInbox' as const) : null) },
+  };
+  // A synthetic click (isTrusted false, as dispatchEvent makes) on the whiteboard is taken by the wall and posts nothing.
+  assert.equal(handleWallTap(office, 5, 5, false), true);
+  assert.deepEqual(posted, []);
+  assert.equal(handleWallTap(office, 5, 5, true), true);
+  assert.deepEqual(posted, [{ type: 'openInbox' }]);
+  // Off the wall nothing is taken, trusted or not.
+  assert.equal(handleWallTap(office, 50, 5, true), false);
+  assert.equal(posted.length, 1);
 });

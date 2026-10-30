@@ -17,7 +17,9 @@ import { findPath } from '../office/layout/tileMap.js';
 import { getLoadedCharacterCount } from '../office/sprites/spriteData.js';
 import type { Character } from '../office/types.js';
 import { CharacterState, Direction, TILE_SIZE } from '../office/types.js';
+import { Effects, type FxKind } from './effects.js';
 import {
+  clockPlateRect,
   findLounge,
   type Lounge,
   type LoungeItem,
@@ -25,6 +27,7 @@ import {
   type Tile,
   type WallHit,
   wallHit,
+  whiteboardRect,
 } from './lounge.js';
 import { type AeroUpdate, agentTypeFromStatus, parseAeroUpdate } from './update.js';
 
@@ -59,6 +62,10 @@ const CHAT_SHOW_SEC = 3;
 const CHAT_LINES = ['...', 'hm', 'ha!', 'ok', 'so...', 'brb'];
 const ROUTE_RETRIES = 3;
 const CANDIDATES_TRIED = 8;
+/** Where an effect's origin sits below the thing it plays on, in world pixels (the effects draw above their origin). */
+const FX_BURST_DROP = 15;
+const FX_COUNTDOWN_DROP = 0;
+const FX_POOF_DROP = 8;
 
 export type RouteMode = 'rest' | 'lunch';
 
@@ -79,6 +86,8 @@ export interface Person {
   ch: Character;
   /** The stock subagent character this one stands in for, while it is away. */
   subId: number | null;
+  /** Walking home after an away trip: a poof when it gets there. */
+  returning: boolean;
 }
 
 interface Chat {
@@ -95,8 +104,16 @@ export class AeroOffice {
   routes = new Map<number, Route>();
   people: Person[] = [];
   chats = new Map<number, Chat>();
-  /** Lead ids waiting on the owner (a question): they stay at their desk. */
-  private awaiting = new Set<number>();
+  /** The effects (pixelfx) Aero starts: a burst on the whiteboard, a countdown on the clock, a poof at a person. */
+  fx = new Effects();
+  /** Seconds the office has run, from the ticks. */
+  private clock = 0;
+  /** Bumped whenever a route is made or dropped: a failed `assign` is tried again at once only after it changed. */
+  private occupancy = 0;
+  private failed = new Map<number, { at: number; occupancy: number }>();
+  /** The update the effects last compared against, and the meetings a countdown already ran for. */
+  private fxSeen: AeroUpdate | null = null;
+  private countdowns = new Set<string>();
   /** Lounge floor tiles a character can walk on (not blocked). */
   loungeWalkable: Tile[] = [];
   rng: () => number = Math.random;
@@ -138,14 +155,14 @@ export class AeroOffice {
     this.loungeWalkable = this.lounge
       ? this.lounge.floor.filter((t) => !blocked.has(key(t.col, t.row)))
       : [];
-    // Routes and people pointed at the old layout.
-    for (const [id, route] of this.routes) {
+    // Routes and people pointed at the old layout: every routed lead is routed again, and the people stand on the new Lounge floor.
+    for (const id of [...this.routes.keys()]) {
       const ch = os.characters.get(id);
-      if (!this.lounge || (route.seatUid !== null && !os.seats.has(route.seatUid))) {
-        this.routes.delete(id);
-        if (ch && route.arrived) ch.state = CharacterState.IDLE;
-      }
+      this.dropRoute(id);
+      if (ch) this.stand(ch);
     }
+    this.failed.clear();
+    this.rehomePeople();
   }
 
   /** Whether the office has what the routing needs: an update that says there is a Lounge, and the Lounge itself. */
@@ -170,21 +187,15 @@ export class AeroOffice {
       return;
     }
 
-    // Who is waiting on the owner. Read while the bubble shows: the status message sets both at once.
-    if (ch.isActive) {
-      this.awaiting.delete(ch.id);
-    } else if (ch.bubbleType === 'waiting') {
-      if (ch.waitingAwaitingInput === true) this.awaiting.add(ch.id);
-      else this.awaiting.delete(ch.id);
-    }
-    const holds = !ch.isActive && (ch.bubbleType === 'permission' || this.awaiting.has(ch.id));
-
     if (ch.isActive) {
       this.leave(ch);
       step();
       return;
     }
-    if (holds) {
+    // Only a permission bubble holds an idle lead at its desk. A question (AskUserQuestion) is an active tool, so the lead is
+    // active and stays anyway; and `idle_prompt` reaches the page as a finished turn with `awaitingInput` for every idle
+    // session, so that flag says nothing about the owner being needed.
+    if (ch.bubbleType === 'permission') {
       this.leave(ch);
       if (ch.state === CharacterState.TYPE) {
         // At its desk, waiting: sit still.
@@ -201,12 +212,23 @@ export class AeroOffice {
     // Truly idle: the Lounge.
     const mode: RouteMode = update.lunch && this.lounge!.table.length > 0 ? 'lunch' : 'rest';
     let route: Route | null = this.routes.get(ch.id) ?? null;
-    if (!route || route.mode !== mode) {
-      route = this.assign(ch, mode);
-      if (!route) {
+    if (route && route.mode !== mode) {
+      // Idle and lunch change over: it gets up first, then the new place is found.
+      this.leave(ch);
+      route = null;
+    }
+    if (!route) {
+      if (this.backedOff(ch.id)) {
         step();
         return;
       }
+      route = this.assign(ch, mode);
+      if (!route) {
+        this.failed.set(ch.id, { at: this.clock, occupancy: this.occupancy });
+        step();
+        return;
+      }
+      this.failed.delete(ch.id);
     }
     if (route.arrived) {
       this.settle(ch, route);
@@ -222,26 +244,47 @@ export class AeroOffice {
     }
     route.tries++;
     if (route.tries >= ROUTE_RETRIES) {
-      this.routes.delete(ch.id);
+      this.dropRoute(ch.id);
       return;
     }
     this.walkTo(ch, route.target);
   }
 
-  /** The lead goes back to the stock rules: its route ends and, if it sat or stood in the Lounge, it gets up. */
+  /** A failed `assign` is not tried again for a second, unless a route was made or dropped since. */
+  private backedOff(id: number): boolean {
+    const failed = this.failed.get(id);
+    return (
+      failed !== undefined && failed.occupancy === this.occupancy && this.clock - failed.at < 1
+    );
+  }
+
+  private putRoute(id: number, route: Route): void {
+    this.routes.set(id, route);
+    this.occupancy++;
+  }
+
+  private dropRoute(id: number): void {
+    if (this.routes.delete(id)) this.occupancy++;
+    this.chats.delete(id);
+  }
+
+  /** Stops the character where its tile is: no path, standing, on the tile's centre (as the stock walk ends). */
+  private stand(ch: Character): void {
+    ch.state = CharacterState.IDLE;
+    ch.frame = 0;
+    ch.frameTimer = 0;
+    ch.wanderTimer = 0;
+    ch.path = [];
+    ch.moveProgress = 0;
+    ch.x = ch.tileCol * TILE_SIZE + TILE_SIZE / 2;
+    ch.y = ch.tileRow * TILE_SIZE + TILE_SIZE / 2;
+  }
+
+  /** The lead goes back to the stock rules: its route ends, whatever it was doing (sitting, standing or walking there) stops. */
   private leave(ch: Character): void {
-    const route = this.routes.get(ch.id);
-    if (!route) return;
-    this.routes.delete(ch.id);
-    this.chats.delete(ch.id);
-    if (route.arrived) {
-      ch.state = CharacterState.IDLE;
-      ch.frame = 0;
-      ch.frameTimer = 0;
-      ch.wanderTimer = 0;
-      ch.path = [];
-      ch.moveProgress = 0;
-    }
+    if (!this.routes.has(ch.id)) return;
+    this.dropRoute(ch.id);
+    this.stand(ch);
   }
 
   private occupied(except: number): Set<string> {
@@ -340,17 +383,17 @@ export class AeroOffice {
     for (const c of candidates) {
       const route: Route = { mode, target: c.target, seatUid: c.seatUid, arrived: false, tries: 0 };
       if (c.target.col === ch.tileCol && c.target.row === ch.tileRow) {
-        this.routes.set(ch.id, route);
+        this.putRoute(ch.id, route);
         this.arrive(ch, route);
         return route;
       }
       if (this.walkTo(ch, c.target)) {
-        this.routes.set(ch.id, route);
+        this.putRoute(ch.id, route);
         this.chats.delete(ch.id);
         return route;
       }
     }
-    this.routes.delete(ch.id);
+    this.dropRoute(ch.id);
     return null;
   }
 
@@ -447,16 +490,56 @@ export class AeroOffice {
   /** Once a tick, after every character stepped. */
   afterTick(dt: number): void {
     this.refresh();
+    this.clock += dt;
     const update = this.enabled();
     for (const id of [...this.routes.keys()]) {
-      if (!this.os.characters.has(id)) {
-        this.routes.delete(id);
-        this.chats.delete(id);
-        this.awaiting.delete(id);
-      }
+      if (!this.os.characters.has(id)) this.dropRoute(id);
+    }
+    for (const id of [...this.failed.keys()]) {
+      if (!this.os.characters.has(id)) this.failed.delete(id);
     }
     this.reconcilePeople(update);
+    this.watchUpdate(update);
     for (const person of [...this.people]) this.stepPerson(person, dt);
+    this.fx.update(dt);
+  }
+
+  // ── Effects (pixelfx) ───────────────────────────────────────────
+
+  /** Starts an effect at world point (x, y), seeded from the office's rng. */
+  private startFx(kind: FxKind, x: number, y: number): boolean {
+    return this.fx.start(kind, x, y, Math.floor(this.rng() * 0x7fffffff));
+  }
+
+  /**
+   * Compares a new update with the last one: a burst on the whiteboard when the inbox rose, a countdown on the clock when the
+   * next meeting is within five minutes (once per meeting).
+   */
+  private watchUpdate(update: AeroUpdate | null): void {
+    const latest = getAeroUpdate();
+    if (latest === this.fxSeen) return;
+    const previous = this.fxSeen;
+    this.fxSeen = latest;
+    if (!update || !this.lounge) return;
+    if (previous !== null && update.inbox > previous.inbox && this.lounge.whiteboard) {
+      const r = whiteboardRect(this.lounge.whiteboard);
+      this.startFx('burst', r.x + r.w / 2, r.y + r.h / 2 + FX_BURST_DROP);
+    }
+    const meeting = update.meeting;
+    if (meeting?.soon === true && this.lounge.clock) {
+      const id = `${meeting.time} ${meeting.title}`;
+      if (!this.countdowns.has(id)) {
+        if (this.countdowns.size >= 64) this.countdowns.clear();
+        this.countdowns.add(id);
+        const r = clockPlateRect(this.lounge.clock);
+        this.startFx('countdown', r.x + r.w / 2, r.y + r.h / 2 + FX_COUNTDOWN_DROP);
+      }
+    }
+  }
+
+  /** A poof at a person's feet. */
+  private poofAt(ch: Character): void {
+    this.startFx('poof', ch.x, ch.y + FX_POOF_DROP);
   }
 
   private reconcilePeople(update: AeroUpdate | null): void {
@@ -505,7 +588,14 @@ export class AeroOffice {
       ch.tileRow = spot.row;
       ch.wanderTimer = 1 + this.rng() * 4;
       startMatrixEffect(ch, 'spawn');
-      this.people.push({ slug: agent.slug, room, name: agent.name, ch, subId: null });
+      this.people.push({
+        slug: agent.slug,
+        room,
+        name: agent.name,
+        ch,
+        subId: null,
+        returning: false,
+      });
     }
   }
 
@@ -534,6 +624,7 @@ export class AeroOffice {
     // Its stand-in is gone: walk back to the Lounge.
     if (person.subId !== null && !os.subagentMeta.has(person.subId)) {
       person.subId = null;
+      person.returning = true;
       ch.isActive = false;
       const spot = this.freeLoungeTile();
       ch.state = CharacterState.IDLE;
@@ -549,6 +640,27 @@ export class AeroOffice {
     // Home it wanders over the Lounge floor only; away it is active and types where it stopped.
     const walkable = person.subId === null ? this.loungeWalkable : os.walkableTiles;
     updateCharacter(ch, dt, walkable, os.seats, os.tileMap, os.blockedTiles);
+    // Home again: a poof where the trip ends.
+    if (person.returning && ch.state !== CharacterState.WALK) {
+      person.returning = false;
+      this.poofAt(ch);
+    }
+  }
+
+  /** The people at home stand on the Lounge floor: after a new layout, one that isn't on it moves to a free tile of it. */
+  private rehomePeople(): void {
+    const onFloor = new Set(this.loungeWalkable.map((t) => key(t.col, t.row)));
+    for (const person of this.people) {
+      const ch = person.ch;
+      if (person.subId !== null || ch.matrixEffect === 'despawn') continue;
+      if (onFloor.has(key(ch.tileCol, ch.tileRow))) continue;
+      const spot = this.freeLoungeTile();
+      if (!spot) continue;
+      ch.tileCol = spot.col;
+      ch.tileRow = spot.row;
+      this.stand(ch);
+      ch.wanderTimer = 1;
+    }
   }
 
   /**
@@ -561,8 +673,10 @@ export class AeroOffice {
     const lead = this.os.characters.get(parentId);
     if (!lead) return false;
     // A project agent only for a lead in its room (preferred); the owner's agents (no room) for any lead.
+    // One that is still spawning matches too; one that is despawning does not. (Two subagents of one type at once: the second
+    // stays stock while the character is away.)
     const free = (p: Person): boolean =>
-      p.slug === type && p.ch.matrixEffect === null && p.subId === null;
+      p.slug === type && p.ch.matrixEffect !== 'despawn' && p.subId === null;
     const person =
       this.people.find((p) => free(p) && p.room !== null && p.room === lead.directoryName) ??
       this.people.find((p) => free(p) && p.room === null);
@@ -572,14 +686,21 @@ export class AeroOffice {
     if (subId === null || !sub) return false;
     sub.aeroHidden = true;
     person.subId = subId;
+    person.returning = false;
     const ch = person.ch;
+    this.poofAt(ch);
     ch.isActive = true;
     const taken = this.occupied(Number.NaN);
+    // To the lead's seat (its desk), not to wherever the lead stands now: a lead resting in the Lounge is not where the work is.
+    const leadSeat = lead.seatId ? this.os.seats.get(lead.seatId) : undefined;
+    const anchor: Tile = leadSeat
+      ? { col: leadSeat.seatCol, row: leadSeat.seatRow }
+      : { col: lead.tileCol, row: lead.tileRow };
     let best: Tile | null = null;
     let bestD = Infinity;
     for (const t of this.os.walkableTiles) {
       if (taken.has(key(t.col, t.row))) continue;
-      const d = Math.abs(t.col - lead.tileCol) + Math.abs(t.row - lead.tileRow);
+      const d = Math.abs(t.col - anchor.col) + Math.abs(t.row - anchor.row);
       if (d < bestD) {
         bestD = d;
         best = t;
@@ -678,6 +799,7 @@ export class AeroOffice {
           directoryName: c.directoryName ?? null,
         })),
       hidden: [...this.os.characters.values()].filter((c) => c.aeroHidden).map((c) => c.id),
+      fxStarted: { ...this.fx.started },
       badges: Object.fromEntries(this.badgeCounts()),
     };
   }
@@ -721,5 +843,7 @@ export interface AeroSnapshot {
     directoryName: string | null;
   }>;
   hidden: number[];
+  /** How many effects of each kind have started (counted, so a short one isn't missed by a poll). */
+  fxStarted: Record<string, number>;
   badges: Record<string, number>;
 }

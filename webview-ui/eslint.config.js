@@ -9,7 +9,7 @@ import { defineConfig, globalIgnores } from 'eslint/config';
 import pixelAgentsPlugin from '../eslint-rules/pixel-agents-rules.mjs';
 
 export default defineConfig([
-  globalIgnores(['dist']),
+  globalIgnores(['dist', 'src/aero/fx/**']),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [

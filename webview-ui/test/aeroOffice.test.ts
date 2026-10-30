@@ -225,40 +225,135 @@ test('lunch: idle leads gather beside the Lounge table with a food bubble; after
   assert.notEqual(os.aero.bubbleFor(1), '\u{1F35C}');
 });
 
-test('a lead waiting on the owner (a question) or on a permission stays at its desk', () => {
-  for (const kind of ['question', 'permission'] as const) {
-    const os = build();
-    lead(os);
-    setAeroUpdate(update());
-    os.setAgentActive(1, false);
-    if (kind === 'question') os.showWaitingBubble(1, true);
-    else os.showPermissionBubble(1);
-    run(os, 90);
-    assert.equal(os.aero.routes.size, 0, kind);
-    assert.equal(at(os, 1), `${DESK_TILE.col},${DESK_TILE.row}`, kind);
-    assert.equal(os.characters.get(1)!.state, CharacterState.TYPE, kind);
-  }
-});
-
-test('a question that outlives its bubble still keeps the lead at its desk; a finished turn after it does not', () => {
+test('a lead with a permission bubble stays at its desk', () => {
   const os = build();
   lead(os);
   setAeroUpdate(update());
   os.setAgentActive(1, false);
-  os.showWaitingBubble(1, true);
-  run(os, 10); // the 2 s bubble is long gone
-  assert.equal(os.characters.get(1)!.bubbleType, null);
+  os.showPermissionBubble(1);
+  run(os, 90);
   assert.equal(os.aero.routes.size, 0);
   assert.equal(at(os, 1), `${DESK_TILE.col},${DESK_TILE.row}`);
-  // It works, then ends a turn without a question.
-  os.setAgentActive(1, true);
-  run(os, 1);
-  os.setAgentActive(1, false);
-  os.showWaitingBubble(1, false);
-  until(os, () => os.aero.routes.get(1)?.arrived === true, 60, 'arrival after a plain finish');
+  assert.equal(os.characters.get(1)!.state, CharacterState.TYPE);
 });
 
-test('a lead that is walking when the question comes goes to its desk', () => {
+test('the real idle sequence (a finished turn, then idle_prompt with awaitingInput) sends the lead to the Lounge; so does lunch', () => {
+  // server claude.ts: `idle_prompt` is a turnEnd with awaitingInput:true for every idle session.
+  for (const lunch of [false, true]) {
+    const os = build();
+    lead(os);
+    setAeroUpdate(update({ lunch }));
+    os.setAgentActive(1, true);
+    run(os, 1);
+    os.setAgentActive(1, false);
+    os.showWaitingBubble(1, false); // Stop
+    run(os, 3);
+    os.showWaitingBubble(1, true); // idle_prompt, about a minute later
+    // It does not wait for anything: the bubble (about two seconds) is no reason to stay.
+    run(os, 0.5);
+    assert.ok(os.aero.routes.has(1), 'routed while the idle_prompt bubble still shows');
+    until(os, () => os.aero.routes.get(1)?.arrived === true, 60, 'arrival after idle_prompt');
+    assert.equal(os.aero.routes.get(1)!.mode, lunch ? 'lunch' : 'rest');
+    // The bubble is long gone and it is still there.
+    run(os, 30);
+    assert.equal(os.aero.routes.get(1)?.arrived, true);
+  }
+});
+
+test('a question (an active tool) keeps the lead working at its desk', () => {
+  const os = build();
+  lead(os);
+  setAeroUpdate(update());
+  os.setAgentActive(1, true);
+  os.showWaitingBubble(1, true);
+  run(os, 60);
+  assert.equal(os.aero.routes.size, 0);
+  assert.equal(at(os, 1), `${DESK_TILE.col},${DESK_TILE.row}`);
+  assert.equal(os.characters.get(1)!.state, CharacterState.TYPE);
+});
+
+test('a failed assign is tried at most about once a second, and at once when a route changed', () => {
+  const os = build();
+  lead(os);
+  setAeroUpdate(update());
+  os.setAgentActive(1, false);
+  run(os, 0.2);
+  os.aero.routes.clear();
+  // No place the lead could take.
+  for (const seat of os.seats.values()) if (seat.uid !== DESK) seat.assigned = true;
+  os.aero.loungeWalkable = [];
+  const real = os.aero.assign.bind(os.aero);
+  let calls = 0;
+  os.aero.assign = (ch, mode) => {
+    calls++;
+    return real(ch, mode);
+  };
+  run(os, 5);
+  assert.ok(calls >= 1 && calls <= 6, `${calls} calls in 5 s`);
+  // A place frees: it is found within the second.
+  for (const seat of os.seats.values()) seat.assigned = seat.uid === DESK;
+  os.aero.loungeWalkable = [{ col: 8, row: 3 }];
+  until(os, () => os.aero.routes.has(1), 1.5, 'a new route');
+});
+
+test('when idle turns to lunch the lead gets up (no route, standing, no path) before the new place is found', () => {
+  const os = build();
+  lead(os);
+  setAeroUpdate(update());
+  os.setAgentActive(1, false);
+  until(os, () => os.aero.routes.get(1)?.arrived === true, 60, 'arrival');
+  const real = os.aero.assign.bind(os.aero);
+  const seen: Array<{ state: string; path: number; routed: boolean }> = [];
+  os.aero.assign = (ch, mode) => {
+    seen.push({ state: ch.state, path: ch.path.length, routed: os.aero.routes.has(ch.id) });
+    return real(ch, mode);
+  };
+  setAeroUpdate(update({ lunch: true }));
+  until(os, () => os.aero.routes.get(1)?.mode === 'lunch', 5, 'lunch route');
+  assert.deepEqual(seen[0], { state: CharacterState.IDLE, path: 0, routed: false });
+});
+
+test('a lead that works while still walking to the Lounge turns for its desk at once', () => {
+  const os = build();
+  lead(os);
+  setAeroUpdate(update());
+  os.setAgentActive(1, false);
+  run(os, 1.5);
+  const ch = os.characters.get(1)!;
+  assert.equal(ch.state, CharacterState.WALK);
+  os.setAgentActive(1, true);
+  os.update(0.1);
+  const last = ch.path[ch.path.length - 1];
+  assert.deepEqual(last, { col: DESK_TILE.col, row: DESK_TILE.row });
+  assert.equal(os.aero.routes.has(1), false);
+});
+
+test('a new layout routes every routed lead again and stands the people on the new Lounge floor', () => {
+  const os = build();
+  lead(os);
+  setAeroUpdate(update({ agents: [{ name: 'Reviewer', slug: 'reviewer' }] }));
+  os.setAgentActive(1, false);
+  until(os, () => os.aero.routes.get(1)?.arrived === true, 60, 'arrival');
+  run(os, MATRIX_EFFECT_DURATION + 0.5);
+  const before = os.aero.routes.get(1)!;
+  const person = os.aero.people[0];
+  // The person stands where the new layout has no Lounge floor.
+  person.ch.tileCol = 1;
+  person.ch.tileRow = 1;
+  os.rebuildFromLayout({ ...os.layout });
+  os.update(0.1);
+  const after = os.aero.routes.get(1);
+  assert.ok(after && after !== before, 'routed again');
+  assert.ok(
+    person.ch.tileCol >= 6 &&
+      person.ch.tileCol <= 11 &&
+      person.ch.tileRow >= 2 &&
+      person.ch.tileRow <= 6,
+    `${person.ch.tileCol},${person.ch.tileRow}`,
+  );
+});
+
+test('a lead that is walking when the permission bubble comes goes to its desk', () => {
   const os = build();
   lead(os);
   setAeroUpdate(update());
@@ -436,6 +531,7 @@ test('a Task with no type, a type that matches nothing, or a near-miss stays sto
     ['t4', 'Subtask: code-reviewer-2'],
     ['t5', 'Subtask: code'],
     ['t6', 'Using Read'],
+    ['t7', 'Subtask: unknown'],
   ]) {
     const id = os.addSubagent(1, tool);
     assert.equal(os.aero.subagentStarted(1, tool, status), false, status);
@@ -445,6 +541,54 @@ test('a Task with no type, a type that matches nothing, or a near-miss stays sto
   assert.equal(os.aero.people[0].subId, null);
   // An id the office doesn't know is no match either.
   assert.equal(os.aero.subagentStarted(1, 'missing', 'Subtask: code-reviewer'), false);
+});
+
+test('a Task with the server\'s "unknown" type matches no one, not even an agent named unknown', () => {
+  const os = build();
+  lead(os);
+  setAeroUpdate(update({ agents: [{ name: 'unknown', slug: 'unknown' }] }));
+  run(os, MATRIX_EFFECT_DURATION + 0.5);
+  const id = os.addSubagent(1, 'tool-1');
+  assert.equal(os.aero.subagentStarted(1, 'tool-1', 'Subtask: unknown'), false);
+  assert.equal(os.characters.get(id)!.aeroHidden, undefined);
+});
+
+test('a character that is still spawning is matched; one that is despawning is not', () => {
+  const os = build();
+  lead(os);
+  setAeroUpdate(update({ agents: [{ name: 'Code Reviewer', slug: 'code-reviewer' }] }));
+  run(os, 0.1); // spawning
+  assert.equal(os.aero.people[0].ch.matrixEffect, 'spawn');
+  os.addSubagent(1, 'tool-1');
+  assert.equal(os.aero.subagentStarted(1, 'tool-1', 'Subtask: code-reviewer'), true);
+  os.removeSubagent(1, 'tool-1');
+
+  const gone = build();
+  lead(gone);
+  setAeroUpdate(update({ agents: [{ name: 'Code Reviewer', slug: 'code-reviewer' }] }));
+  run(gone, MATRIX_EFFECT_DURATION + 0.5);
+  setAeroUpdate(update({ agents: [] }));
+  run(gone, 0.1); // despawning
+  assert.equal(gone.aero.people[0].ch.matrixEffect, 'despawn');
+  gone.addSubagent(1, 'tool-1');
+  assert.equal(gone.aero.subagentStarted(1, 'tool-1', 'Subtask: code-reviewer'), false);
+});
+
+test("a configured character walks to its lead's desk, not to where the lead rests", () => {
+  const os = build();
+  lead(os);
+  setAeroUpdate(update({ agents: [{ name: 'Code Reviewer', slug: 'code-reviewer' }] }));
+  os.setAgentActive(1, false);
+  until(os, () => os.aero.routes.get(1)?.arrived === true, 60, 'the lead rests in the Lounge');
+  run(os, MATRIX_EFFECT_DURATION + 0.5);
+  const person = os.aero.people[0];
+  os.addSubagent(1, 'tool-1');
+  assert.equal(os.aero.subagentStarted(1, 'tool-1', 'Subtask: code-reviewer'), true);
+  const goal = person.ch.path[person.ch.path.length - 1];
+  assert.ok(
+    Math.abs(goal.col - DESK_TILE.col) + Math.abs(goal.row - DESK_TILE.row) <= 2,
+    `${goal.col},${goal.row} is not beside the desk ${DESK_TILE.col},${DESK_TILE.row}`,
+  );
 });
 
 test('the snapshot lists the leads with their place, state and room, and not the subagents', () => {
@@ -565,7 +709,7 @@ test("badges count each lead's live subagents", () => {
 test('the snapshot hook shows the routing state', () => {
   const os = build();
   lead(os);
-  setAeroUpdate(update({ inbox: 7, meeting: { time: '14:30', title: 'Review' } }));
+  setAeroUpdate(update({ inbox: 7, meeting: { time: '14:30', title: 'Review', soon: false } }));
   os.setAgentActive(1, false);
   until(os, () => os.aero.routes.get(1)?.arrived === true);
   const snap = os.aero.snapshot();

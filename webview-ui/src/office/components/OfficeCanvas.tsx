@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react';
 
-import { postToAero } from '../../aero/install.js';
+import { handleWallTap } from '../../aero/install.js';
 import { drawAeroOverlay } from '../../aero/overlay.js';
 import {
   CAMERA_FOLLOW_LERP,
@@ -640,11 +640,7 @@ export function OfficeCanvas({
       }
 
       // Aero's wall objects (the Lounge whiteboard and clock): a real click tells Aero, nothing else happens.
-      const wall = officeState.aero.wallHitAt(pos.worldX, pos.worldY);
-      if (wall !== null) {
-        if (trusted) postToAero(wall);
-        return;
-      }
+      if (handleWallTap(officeState, pos.worldX, pos.worldY, trusted)) return;
 
       // Pet hit: toggle the heart bubble.
       const petId = officeState.getPetAt(pos.worldX, pos.worldY);

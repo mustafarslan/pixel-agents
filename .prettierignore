@@ -9,3 +9,4 @@ webview-ui/dist/
 webview-ui/public/
 scripts/*.html
 
+webview-ui/src/aero/fx/

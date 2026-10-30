@@ -27,6 +27,8 @@ export interface AeroMeeting {
   /** "HH:MM", on the Mac's clock. */
   time: string;
   title: string;
+  /** Whether it starts within five minutes (Aero decides: the page has no clock of its own). */
+  soon: boolean;
 }
 
 export interface AeroUpdate {
@@ -78,11 +80,12 @@ export function parseAeroUpdate(raw: unknown): AeroUpdate | null {
 
   let parsedMeeting: AeroMeeting | null = null;
   if (meeting !== null) {
-    if (!isPlainObject(meeting) || !hasKeys(meeting, ['time', 'title'])) return null;
+    if (!isPlainObject(meeting) || !hasKeys(meeting, ['soon', 'time', 'title'])) return null;
     if (typeof meeting.time !== 'string' || !TIME_RE.test(meeting.time)) return null;
+    if (typeof meeting.soon !== 'boolean') return null;
     const title = cleanText(meeting.title, MAX_TITLE_CHARS, true);
     if (title === null) return null;
-    parsedMeeting = { time: meeting.time, title };
+    parsedMeeting = { time: meeting.time, title, soon: meeting.soon };
   }
 
   if (!Array.isArray(agents) || agents.length > MAX_AGENTS) return null;
@@ -110,11 +113,14 @@ export function parseAeroUpdate(raw: unknown): AeroUpdate | null {
   return { lunch, meeting: parsedMeeting, inbox, agents: parsedAgents, lounge };
 }
 
-/** `Subtask: <agent_type>` (the status the server sends with a hook-made subagent), or null. */
+/**
+ * `Subtask: <agent_type>` (the status the server sends with a hook-made subagent), or null. A subagent with no type comes as
+ * `Subtask: unknown` from the server (hookEventHandler.ts), which is no type either: an agent named `unknown` is never matched.
+ */
 export function agentTypeFromStatus(status: unknown): string | null {
   if (typeof status !== 'string' || !status.startsWith('Subtask:')) return null;
   const type = status.slice('Subtask:'.length).trim();
-  return type.length > 0 ? type : null;
+  return type.length > 0 && type !== 'unknown' ? type : null;
 }
 
 /** Counts shown on a badge: 1..99, then "99+". */

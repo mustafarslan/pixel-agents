@@ -44,3 +44,19 @@ export function postToAero(type: WallHit): boolean {
   handler.postMessage({ type });
   return true;
 }
+
+/**
+ * A tap at world point (x, y): whether it landed on a wall object, which then takes the tap whatever else is there. Only a tap
+ * the browser made from a real click (`trusted`, the event's `isTrusted`) tells Aero; a script's `dispatchEvent` does nothing.
+ */
+export function handleWallTap(
+  office: { aero: { wallHitAt(x: number, y: number): WallHit | null } },
+  worldX: number,
+  worldY: number,
+  trusted: boolean,
+): boolean {
+  const wall = office.aero.wallHitAt(worldX, worldY);
+  if (wall === null) return false;
+  if (trusted) postToAero(wall);
+  return true;
+}

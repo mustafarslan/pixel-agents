@@ -11,7 +11,7 @@ import { agentTypeFromStatus, badgeText, clip, parseAeroUpdate } from '../src/ae
 
 const good = () => ({
   lunch: false,
-  meeting: { time: '14:30', title: 'Design review' },
+  meeting: { time: '14:30', title: 'Design review', soon: false },
   inbox: 3,
   agents: [
     { name: 'Code Reviewer', slug: 'code-reviewer' },
@@ -58,7 +58,10 @@ test('wrong types reject it', () => {
 });
 
 test('the meeting time is HH:MM and the title is capped and clean', () => {
-  const withMeeting = (time: string, title: string) => ({ ...good(), meeting: { time, title } });
+  const withMeeting = (time: string, title: string) => ({
+    ...good(),
+    meeting: { time, title, soon: false },
+  });
   assert.notEqual(parseAeroUpdate(withMeeting('00:00', '')), null);
   assert.notEqual(parseAeroUpdate(withMeeting('23:59', 'x'.repeat(60))), null);
   for (const time of ['24:00', '9:30', '12:60', '12:5', '1230', '12:30:00', ' 12:30']) {
@@ -69,7 +72,15 @@ test('the meeting time is HH:MM and the title is capped and clean', () => {
   assert.equal(parseAeroUpdate(withMeeting('12:00', 'a‮b')), null);
   assert.equal(parseAeroUpdate(withMeeting('12:00', 'a b')), null);
   assert.equal(parseAeroUpdate({ ...good(), meeting: { time: '12:00' } }), null);
-  assert.equal(parseAeroUpdate({ ...good(), meeting: { time: '12:00', title: 'a', x: 1 } }), null);
+  assert.equal(parseAeroUpdate({ ...good(), meeting: { time: '12:00', title: 'a' } }), null);
+  assert.equal(
+    parseAeroUpdate({ ...good(), meeting: { time: '12:00', title: 'a', soon: 1 } }),
+    null,
+  );
+  assert.equal(
+    parseAeroUpdate({ ...good(), meeting: { time: '12:00', title: 'a', soon: true, x: 1 } }),
+    null,
+  );
   // 60 code points that take two UTF-16 units each still fit.
   assert.notEqual(parseAeroUpdate(withMeeting('12:00', '\u{1F600}'.repeat(60))), null);
 });
@@ -158,6 +169,10 @@ test('the agent type comes from "Subtask: <type>" only', () => {
   assert.equal(agentTypeFromStatus('Subtask:   spaced  '), 'spaced');
   assert.equal(agentTypeFromStatus('Subtask:'), null);
   assert.equal(agentTypeFromStatus('Subtask: '), null);
+  // The server's word for a subagent with no type (hookEventHandler.ts: `Subtask: unknown`), however it is spaced.
+  assert.equal(agentTypeFromStatus('Subtask: unknown'), null);
+  assert.equal(agentTypeFromStatus('Subtask:unknown '), null);
+  assert.equal(agentTypeFromStatus('Subtask: unknown-agent'), 'unknown-agent');
   assert.equal(agentTypeFromStatus('Using Read'), null);
   assert.equal(agentTypeFromStatus(undefined), null);
   assert.equal(agentTypeFromStatus(4), null);

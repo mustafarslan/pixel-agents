@@ -23,6 +23,8 @@ import {
 import type { OfficeState } from '../office/engine/officeState.js';
 import type { Character } from '../office/types.js';
 import { CharacterState } from '../office/types.js';
+import { drawEffects } from './effects.js';
+import { fitCached } from './fit.js';
 import { clockPlateRect, whiteboardRect } from './lounge.js';
 import { badgeText, clip } from './update.js';
 
@@ -154,14 +156,14 @@ function drawWall(
     ctx.textBaseline = 'middle';
     ctx.fillStyle = AERO_PLATE_TEXT;
     const meeting = update.meeting;
-    let text = 'no meeting';
-    if (meeting) {
-      text = clip(`${meeting.time} ${meeting.title}`, 60);
-      const room = r.w * zoom - 4;
-      while (text.length > 1 && ctx.measureText(text).width > room) {
-        text = clip(text, Array.from(text).length - 1);
-      }
-    }
+    const text = meeting
+      ? fitCached(
+          `${meeting.time} ${meeting.title}`,
+          r.w * zoom - 4,
+          zoom,
+          (t) => ctx.measureText(t).width,
+        )
+      : 'no meeting';
     ctx.fillText(text, offsetX + (r.x + r.w / 2) * zoom, offsetY + (r.y + r.h / 2) * zoom + 1);
   }
 }
@@ -174,6 +176,8 @@ export function drawAeroOverlay(
   zoom: number,
 ): void {
   ctx.save();
+  // The effects first: the text of the wall objects, the badges and the names stay readable over them.
+  drawEffects(ctx, os.aero.fx, offsetX, offsetY, zoom);
   drawWall(ctx, os, offsetX, offsetY, zoom);
 
   // Badges: the live subagents of each lead, also when it isn't hovered.
