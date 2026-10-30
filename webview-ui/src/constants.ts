@@ -560,3 +560,17 @@ export const VISUAL_VIEWPORT_FULL_EPSILON_PX = 1;
  *  (with an editable focused) = the software keyboard is up. Well above an
  *  address bar collapsing (~56 px), well below any on-screen keyboard. */
 export const KEYBOARD_MIN_HEIGHT_PX = 150;
+
+// ── Aero overlay (src/aero) ──────────────────────────────────────────
+export const AERO_BUBBLE_FILL = '#ffffff';
+export const AERO_BUBBLE_BORDER = '#3a3a4a';
+export const AERO_BUBBLE_TEXT = '#20202c';
+export const AERO_BADGE_FILL = '#d6482f';
+export const AERO_BADGE_TEXT = '#ffffff';
+export const AERO_NAME_TEXT = '#f4f1de';
+export const AERO_NAME_SHADOW = '#000000';
+export const AERO_BOARD_INK = '#2a2a38';
+export const AERO_BOARD_ALERT = '#c0392b';
+export const AERO_PLATE_FILL = '#20202c';
+export const AERO_PLATE_BORDER = '#8a8aa0';
+export const AERO_PLATE_TEXT = '#f4f1de';

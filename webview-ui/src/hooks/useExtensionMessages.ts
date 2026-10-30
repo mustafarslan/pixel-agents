@@ -645,6 +645,8 @@ export function useExtensionMessages(
           const set = (backgroundParentToolIdsRef.current[id] ??= new Set());
           set.add(parentToolId);
         }
+        // A configured Aero character takes this subagent's place when `Subtask: <agent_type>` names it.
+        os.aero.subagentStarted(id, parentToolId, status);
         const subToolName = extractToolName(status);
         os.setAgentTool(subId, subToolName);
         os.setAgentActive(subId, true);

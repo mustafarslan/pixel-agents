@@ -1,4 +1,5 @@
 import { pickDiversePalette } from '../../../../core/src/paletteUtils.js';
+import { AeroOffice } from '../../aero/office.js';
 import {
   AUTO_ON_FACING_DEPTH,
   AUTO_ON_SIDE_DEPTH,
@@ -108,6 +109,9 @@ export class OfficeState {
    * others.
    */
   greeter: Character | null = null;
+
+  /** Aero's idle and lunch routing, configured characters and wall objects (src/aero). Inert without its update. */
+  readonly aero = new AeroOffice(this);
 
   /** World-space point the camera drifts to while the greeter is up
    *  (the bubble overlay recomputes it every frame: the combined center of the
@@ -1146,8 +1150,10 @@ export class OfficeState {
       }
 
       // Temporarily unblock own seat so character can pathfind to it
-      this.withOwnSeatUnblocked(ch, () =>
-        updateCharacter(ch, dt, this.walkableTiles, this.seats, this.tileMap, this.blockedTiles),
+      this.aero.drive(ch, dt, () =>
+        this.withOwnSeatUnblocked(ch, () =>
+          updateCharacter(ch, dt, this.walkableTiles, this.seats, this.tileMap, this.blockedTiles),
+        ),
       );
 
       // Tick bubble timer for waiting bubbles
@@ -1163,6 +1169,7 @@ export class OfficeState {
     for (const id of toDelete) {
       this.characters.delete(id);
     }
+    this.aero.afterTick(dt);
 
     // ── Pet FSM ────────────────────────────────────────────────
     for (const pet of this.pets) {
@@ -1199,7 +1206,7 @@ export class OfficeState {
    *  is up, the consent greeter. This is the ONE place the greeter joins the
    *  agents — every other consumer reads `characters` and gets agents only. */
   getCharacters(): Character[] {
-    const chars = Array.from(this.characters.values());
+    const chars = this.aero.characters(Array.from(this.characters.values()));
     if (this.greeter) chars.push(this.greeter);
     return chars;
   }
@@ -1212,6 +1219,7 @@ export class OfficeState {
     for (const ch of chars) {
       // Skip characters that are despawning
       if (ch.matrixEffect === 'despawn') continue;
+      if (ch.aeroHidden) continue;
       // Character sprite is 16x24, anchored bottom-center
       // Apply sitting offset to match visual position
       const sittingOffset = ch.state === CharacterState.TYPE ? CHARACTER_SITTING_OFFSET_PX : 0;

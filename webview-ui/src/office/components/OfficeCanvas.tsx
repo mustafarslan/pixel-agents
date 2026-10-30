@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef } from 'react';
 
+import { postToAero } from '../../aero/install.js';
+import { drawAeroOverlay } from '../../aero/overlay.js';
 import {
   CAMERA_FOLLOW_LERP,
   CAMERA_FOLLOW_SNAP_THRESHOLD,
@@ -218,6 +220,8 @@ export function OfficeCanvas({
           officeState.pets,
         );
         offsetRef.current = { x: offsetX, y: offsetY };
+        // Aero: badges, names, bubbles and the wall objects' text, over the stock frame.
+        drawAeroOverlay(ctx, officeState, offsetX, offsetY, zoom);
 
         // Store delete/rotate button bounds for hit-testing
         deleteButtonBoundsRef.current = editorRender?.deleteButtonBounds ?? null;
@@ -603,7 +607,7 @@ export function OfficeCanvas({
   // Shared by mouse click and touch tap — both resolve a viewport point to a
   // character / pet / seat interaction.
   const performTap = useCallback(
-    (clientX: number, clientY: number) => {
+    (clientX: number, clientY: number, trusted = false) => {
       const pos = screenToWorld(clientX, clientY);
       if (!pos) return;
 
@@ -632,6 +636,13 @@ export function OfficeCanvas({
           officeState.cameraFollowId = hitId;
         }
         onClick(hitId); // still focus terminal
+        return;
+      }
+
+      // Aero's wall objects (the Lounge whiteboard and clock): a real click tells Aero, nothing else happens.
+      const wall = officeState.aero.wallHitAt(pos.worldX, pos.worldY);
+      if (wall !== null) {
+        if (trusted) postToAero(wall);
         return;
       }
 
@@ -690,7 +701,7 @@ export function OfficeCanvas({
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
       if (isEditMode) return; // handled by mouseDown/mouseUp
-      performTap(e.clientX, e.clientY);
+      performTap(e.clientX, e.clientY, e.nativeEvent.isTrusted);
     },
     [isEditMode, performTap],
   );

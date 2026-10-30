@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 
+import { installAeroOffice } from './aero/install.js';
 import { toMajorMinor } from './changelogData.js';
 import { AgentCardBar } from './components/AgentCardBar.js';
 import { BottomToolbar } from './components/BottomToolbar.js';
@@ -52,6 +53,8 @@ const editorState = new EditorState();
 // Installed only under the e2e harness so they never patch prototypes or grow
 // unbounded logs in a real user's session.
 if (isE2E) installTestHooks(officeStateRef);
+// Aero's data channel into the page (window.aeroOffice.update); always installed, inert until Aero calls it.
+installAeroOffice();
 
 function getOfficeState(): OfficeState {
   if (!officeStateRef.current) {

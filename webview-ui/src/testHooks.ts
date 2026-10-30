@@ -1,3 +1,4 @@
+import type { AeroSnapshot } from './aero/office.js';
 import type { ColorValue } from './components/ui/types.js';
 import { OfficeState } from './office/engine/officeState.js';
 import { isGhostHeadlessAgentsEnabled } from './office/engine/renderer.js';
@@ -110,6 +111,8 @@ declare global {
         parentToolId?: string;
       }>;
       selectAgent?: (id: number) => void;
+      /** Aero's routing state: the last accepted update, the Lounge, routes, configured characters, hidden subs, badges. */
+      getAero?: () => AeroSnapshot | null;
     };
   }
 }
@@ -160,6 +163,8 @@ export function installTestHooks(officeStateRef: { current: OfficeState | null }
   hooks.getGhostHeadlessAgents = () => isGhostHeadlessAgentsEnabled();
 
   hooks.getCameraFollowId = () => officeStateRef.current?.cameraFollowId ?? null;
+
+  hooks.getAero = () => officeStateRef.current?.aero.snapshot() ?? null;
 
   hooks.selectAgent = (id) => {
     const os = officeStateRef.current;

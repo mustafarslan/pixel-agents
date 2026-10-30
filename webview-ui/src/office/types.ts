@@ -235,6 +235,8 @@ export interface Character {
    *  per-consumer guard reads this flag. It exists for the render/e2e snapshot
    *  (testHooks.getCharacters) to tell the greeter from agents. */
   isGreeter?: boolean;
+  /** A stock subagent that a configured Aero character stands in for: not drawn, not hit-tested, no label. */
+  aeroHidden?: boolean;
 
   // -- Agent Teams --
   /** Team name this agent belongs to */
