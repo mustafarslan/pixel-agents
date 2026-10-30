@@ -447,6 +447,25 @@ test('a Task with no type, a type that matches nothing, or a near-miss stays sto
   assert.equal(os.aero.subagentStarted(1, 'missing', 'Subtask: code-reviewer'), false);
 });
 
+test('the snapshot lists the leads with their place, state and room, and not the subagents', () => {
+  const os = build();
+  os.addAgent(1, 0, 0, DESK, true, '0a1b2c3d4e5f');
+  os.addAgent(2, 0, 0, undefined, true);
+  os.addSubagent(1, 'tool-1');
+  run(os, 1);
+  const leads = os.aero.snapshot().leads;
+  assert.deepEqual(
+    leads.map((l) => [l.id, l.directoryName]),
+    [
+      [1, '0a1b2c3d4e5f'],
+      [2, null],
+    ],
+  );
+  assert.ok(leads.every((l) => Number.isInteger(l.col) && Number.isInteger(l.row)));
+  assert.equal(typeof leads[0].active, 'boolean');
+  assert.equal(typeof leads[0].state, 'string');
+});
+
 test('a project agent matches only a lead whose directoryName is its room; the owner agent matches any lead', () => {
   const roomA = '0a1b2c3d4e5f';
   const roomB = 'ffeeddccbbaa';

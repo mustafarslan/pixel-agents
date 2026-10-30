@@ -667,6 +667,16 @@ export class AeroOffice {
         state: p.ch.state,
         away: p.subId !== null,
       })),
+      leads: [...this.os.characters.values()]
+        .filter((c) => !c.isSubagent)
+        .map((c) => ({
+          id: c.id,
+          col: c.tileCol,
+          row: c.tileRow,
+          state: c.state,
+          active: c.isActive,
+          directoryName: c.directoryName ?? null,
+        })),
       hidden: [...this.os.characters.values()].filter((c) => c.aeroHidden).map((c) => c.id),
       badges: Object.fromEntries(this.badgeCounts()),
     };
@@ -700,6 +710,15 @@ export interface AeroSnapshot {
     row: number;
     state: string;
     away: boolean;
+  }>;
+  /** Every lead (not a subagent): where it is and whether it works. */
+  leads: Array<{
+    id: number;
+    col: number;
+    row: number;
+    state: string;
+    active: boolean;
+    directoryName: string | null;
   }>;
   hidden: number[];
   badges: Record<string, number>;
