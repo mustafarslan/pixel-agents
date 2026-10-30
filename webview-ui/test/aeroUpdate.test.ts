@@ -81,6 +81,14 @@ test('the meeting time is HH:MM and the title is capped and clean', () => {
     parseAeroUpdate({ ...good(), meeting: { time: '12:00', title: 'a', soon: true, x: 1 } }),
     null,
   );
+  // A flag is two code points (Array.from counts what Aero's scalars count): 58 letters and a flag are 60, 59 and a flag are 61.
+  assert.notEqual(
+    parseAeroUpdate(withMeeting('12:00', 'x'.repeat(58) + '\u{1F1E9}\u{1F1EA}')),
+    null,
+  );
+  assert.equal(parseAeroUpdate(withMeeting('12:00', 'x'.repeat(59) + '\u{1F1E9}\u{1F1EA}')), null);
+  // A joiner (Cf) is refused, which is why Aero strips it before it counts.
+  assert.equal(parseAeroUpdate(withMeeting('12:00', '\u{1F468}\u200D\u{1F469}')), null);
   // 60 code points that take two UTF-16 units each still fit.
   assert.notEqual(parseAeroUpdate(withMeeting('12:00', '\u{1F600}'.repeat(60))), null);
 });
