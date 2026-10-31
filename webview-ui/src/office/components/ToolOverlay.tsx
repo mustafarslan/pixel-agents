@@ -155,7 +155,7 @@ export function ToolOverlay({
     <>
       {allIds.map((id) => {
         const ch = officeState.characters.get(id);
-        if (!ch || ch.aeroHidden) return null;
+        if (!ch || officeState.aero.hides(ch)) return null;
 
         const isSelected = selectedId === id;
         const isHovered = hoveredId === id;

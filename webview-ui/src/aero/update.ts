@@ -5,7 +5,8 @@
  * types and caps. Anything else is rejected whole, and the page keeps the last update it accepted. The page draws
  * these strings with canvas `fillText` only, never as HTML.
  *
- * The exact JSON (`pods` is the open office's live pod data; it is optional, and `null` means the same as absent):
+ * The exact JSON (`pods` is the open office's live pod data and `floor` the floor on show; both are optional, and `null`
+ * means the same as absent):
  *
  *   {
  *     "lunch": false,
@@ -16,7 +17,8 @@
  *     "pods": {
  *       "mappings": { "<directoryName>": ["Pod 1"], "<directoryName>": ["Hot desks"], ... },
  *       "labels":   { "Pod 1": { "name": "feat-auth", "dim": false }, "Pod 2": { "name": "", "dim": true }, ... }
- *     }
+ *     },
+ *     "floor": { "id": "<12 hex>", "number": 2, "name": "web", "rooms": ["<12 hex>" | "prruns", ...] }
  *   }
  *
  * - `mappings`: at most 32 keys (14 worktrees and the fixed ones); a key is a directory name (1..40 characters), its value
@@ -24,6 +26,9 @@
  *   accepted update carries them.
  * - `labels`: at most 16 keys, each an area label (1..40 characters). `name` is what the pod is drawn with (0..40
  *   characters; empty means a pod with no worktree: no text), `dim` whether it has no live Claude (drawn dimmed).
+ * - `floor`: the one floor on show (one per repo; its bar and the other floors stay in Aero). `id` is 12 hex, `number` 1..16,
+ *   `name` 1..32 characters, `rooms` at most 64 distinct directory names (12 hex, or `prruns`, which is on every floor). A
+ *   character whose directory name is not in `rooms` (and its subagents and teammates) is not on this floor: hidden, with no seat.
  * - Strings have no control, format or line-separator characters. Keys are exactly these; nothing else is accepted.
  */
 
@@ -36,6 +41,12 @@ export const MAX_POD_MAPPINGS = 32;
 export const MAX_AREAS_PER_MAPPING = 4;
 export const MAX_POD_LABELS = 16;
 export const MAX_LABEL_CHARS = 40;
+/** Floors: one per repo, at most 16; the update carries the one on show. */
+export const MAX_FLOORS = 16;
+export const MAX_FLOOR_NAME_CHARS = 32;
+export const MAX_FLOOR_ROOMS = 64;
+/** The shared stub folder of the PR runs, which are on every floor. */
+export const PR_RUNS_ROOM = 'prruns';
 
 export interface AeroAgent {
   /** What the character is labelled with. */
@@ -71,6 +82,17 @@ export interface AeroPods {
   labels: Record<string, AeroPodLabel>;
 }
 
+export interface AeroFloor {
+  /** The repo's floor id (12 hex). */
+  id: string;
+  /** 1..16, the floor's place in the bar ("2F"). */
+  number: number;
+  /** The repo's name. */
+  name: string;
+  /** The directory names on this floor. */
+  rooms: string[];
+}
+
 export interface AeroUpdate {
   /** True from 12:00 to 13:00 by the Mac's clock (Aero computes it: the page has no clock of its own). */
   lunch: boolean;
@@ -81,10 +103,12 @@ export interface AeroUpdate {
   lounge: boolean;
   /** The open office's live pods. Absent when the update carries none. */
   pods?: AeroPods;
+  /** The floor on show. Absent when the update carries none: everyone is on the floor. */
+  floor?: AeroFloor;
 }
 
 const KEYS = ['agents', 'inbox', 'lounge', 'lunch', 'meeting'];
-const KEYS_WITH_PODS = [...KEYS, 'pods'].sort();
+const OPTIONAL_KEYS = ['floor', 'pods'];
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const ROOM_RE = /^[0-9a-f]{12}$/;
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -95,6 +119,19 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const proto = Object.getPrototypeOf(value);
   return proto === Object.prototype || proto === null;
+}
+
+/** Whether `value` has every key of `required` and no key that isn't in `required` or `optional`. */
+function hasKeysAmong(
+  value: Record<string, unknown>,
+  required: string[],
+  optional: string[],
+): boolean {
+  const own = Object.keys(value);
+  return (
+    required.every((key) => own.includes(key)) &&
+    own.every((key) => required.includes(key) || optional.includes(key))
+  );
 }
 
 function hasKeys(value: Record<string, unknown>, keys: string[]): boolean {
@@ -150,16 +187,45 @@ function parsePods(raw: unknown): AeroPods | null {
   return { mappings: parsedMappings, labels: parsedLabels };
 }
 
+/** The floor, or null when it isn't exactly the shape above. */
+function parseFloor(raw: unknown): AeroFloor | null {
+  if (!isPlainObject(raw) || !hasKeys(raw, ['id', 'name', 'number', 'rooms'])) return null;
+  const { id, number, name, rooms } = raw;
+  if (typeof id !== 'string' || !ROOM_RE.test(id)) return null;
+  if (
+    typeof number !== 'number' ||
+    !Number.isInteger(number) ||
+    number < 1 ||
+    number > MAX_FLOORS
+  ) {
+    return null;
+  }
+  const text = cleanText(name, MAX_FLOOR_NAME_CHARS);
+  if (text === null) return null;
+  if (!Array.isArray(rooms) || rooms.length > MAX_FLOOR_ROOMS) return null;
+  const seen = new Set<string>();
+  for (const room of rooms) {
+    if (typeof room !== 'string' || !(ROOM_RE.test(room) || room === PR_RUNS_ROOM)) return null;
+    if (seen.has(room)) return null;
+    seen.add(room);
+  }
+  return { id, number, name: text, rooms: [...rooms] as string[] };
+}
+
 /** The update, or null when it isn't exactly the shape above. */
 export function parseAeroUpdate(raw: unknown): AeroUpdate | null {
   if (!isPlainObject(raw)) return null;
-  const withPods = hasKeys(raw, KEYS_WITH_PODS);
-  if (!withPods && !hasKeys(raw, KEYS)) return null;
+  if (!hasKeysAmong(raw, KEYS, OPTIONAL_KEYS)) return null;
   const { lunch, lounge, inbox, meeting, agents } = raw;
   let pods: AeroPods | null = null;
-  if (withPods && raw.pods !== null) {
+  if ('pods' in raw && raw.pods !== null) {
     pods = parsePods(raw.pods);
     if (pods === null) return null;
+  }
+  let floor: AeroFloor | null = null;
+  if ('floor' in raw && raw.floor !== null) {
+    floor = parseFloor(raw.floor);
+    if (floor === null) return null;
   }
   if (typeof lunch !== 'boolean' || typeof lounge !== 'boolean') return null;
   if (typeof inbox !== 'number' || !Number.isInteger(inbox) || inbox < 0 || inbox > MAX_INBOX) {
@@ -206,6 +272,7 @@ export function parseAeroUpdate(raw: unknown): AeroUpdate | null {
     lounge,
   };
   if (pods !== null) update.pods = pods;
+  if (floor !== null) update.floor = floor;
   return update;
 }
 

@@ -236,6 +236,55 @@ export class OfficeState {
     }
   }
 
+  /** Aero: a character leaves the floor on show, so its seat is free and it holds none. */
+  releaseSeat(ch: Character): void {
+    if (ch.seatId) {
+      const seat = this.seats.get(ch.seatId);
+      if (seat) seat.assigned = false;
+    }
+    ch.seatId = null;
+    ch.path = [];
+    ch.moveProgress = 0;
+    if (ch.state === CharacterState.WALK) ch.state = CharacterState.IDLE;
+  }
+
+  /**
+   * Aero: characters whose floor is on show again are seated by the mappings, leads first, and put on their seats at once (as the
+   * second pass of `rebuildFromLayout` does), not walked there. A teammate takes the seat closest to its lead's, inside its zone.
+   */
+  placeArrivals(arrivals: Character[]): void {
+    for (const ch of arrivals) {
+      if (ch.isSubagent || ch.seatId || this.characters.get(ch.id) !== ch) continue;
+      let seatId: string | null = null;
+      const lead = ch.leadAgentId !== undefined ? this.characters.get(ch.leadAgentId) : undefined;
+      const anchor = lead ? anchorTile(lead, this.seats) : null;
+      if (anchor) seatId = this.closestFreeSeatInZone(anchor, lead!.seatId).seatId;
+      if (!seatId) seatId = this.findFreeSeat(ch.directoryName);
+      const seat = seatId ? this.seats.get(seatId) : undefined;
+      if (!seatId || !seat) continue;
+      seat.assigned = true;
+      ch.seatId = seatId;
+      ch.tileCol = seat.seatCol;
+      ch.tileRow = seat.seatRow;
+      ch.x = seat.seatCol * TILE_SIZE + TILE_SIZE / 2;
+      ch.y = seat.seatRow * TILE_SIZE + TILE_SIZE / 2;
+      ch.dir = seat.facingDir;
+      ch.path = [];
+      ch.moveProgress = 0;
+      ch.state = CharacterState.TYPE;
+      ch.frame = 0;
+      ch.frameTimer = 0;
+      if (!ch.isActive) {
+        ch.seatTimer = INACTIVE_SEAT_TIMER_MIN_SEC + Math.random() * INACTIVE_SEAT_TIMER_RANGE_SEC;
+      }
+    }
+  }
+
+  /** Aero: the PCs that are on follow the seats as they are now. */
+  refreshFurniture(): void {
+    this.rebuildFurnitureInstances();
+  }
+
   /** Aero: the characters whose seat is theirs to move by mapping: leads, not subagents, teammates or the despawning. */
   private reseatableLeads(): Character[] {
     return [...this.characters.values()].filter(
@@ -386,7 +435,7 @@ export class OfficeState {
 
     // Second pass: assign remaining characters to free seats
     for (const ch of this.characters.values()) {
-      if (ch.seatId) continue;
+      if (ch.seatId || this.aero.isOffFloor(ch.id)) continue;
       const seatId = this.findFreeSeat(ch.directoryName);
       if (seatId) {
         this.seats.get(seatId)!.assigned = true;
@@ -720,6 +769,8 @@ export class OfficeState {
       startMatrixEffect(ch, 'spawn');
     }
     this.characters.set(id, ch);
+    // Aero: a character of another floor holds no seat; the sync lets go of the one it was just given.
+    this.aero.syncMappings();
   }
 
   // ── Greeter ───────────────────────────────────────────────────
@@ -1432,7 +1483,7 @@ export class OfficeState {
     for (const ch of chars) {
       // Skip characters that are despawning
       if (ch.matrixEffect === 'despawn') continue;
-      if (ch.aeroHidden) continue;
+      if (this.aero.hides(ch)) continue;
       // Character sprite is 16x24, anchored bottom-center
       // Apply sitting offset to match visual position
       const sittingOffset = ch.state === CharacterState.TYPE ? CHARACTER_SITTING_OFFSET_PX : 0;

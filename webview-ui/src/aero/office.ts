@@ -29,7 +29,13 @@ import {
   wallHit,
   whiteboardRect,
 } from './lounge.js';
-import { type AeroPods, type AeroUpdate, agentTypeFromStatus, parseAeroUpdate } from './update.js';
+import {
+  type AeroFloor,
+  type AeroPods,
+  type AeroUpdate,
+  agentTypeFromStatus,
+  parseAeroUpdate,
+} from './update.js';
 
 // ── The last update ────────────────────────────────────────────────
 
@@ -55,6 +61,18 @@ export function podLabelSet(pods: AeroPods): ReadonlySet<string> {
   if (!set) {
     set = new Set(Object.keys(pods.labels));
     labelSets.set(pods, set);
+  }
+  return set;
+}
+
+const roomSets = new WeakMap<AeroFloor, ReadonlySet<string>>();
+
+/** The rooms of `floor` as a set, built once per floor object (an update makes a new one). */
+function floorRooms(floor: AeroFloor): ReadonlySet<string> {
+  let set = roomSets.get(floor);
+  if (!set) {
+    set = new Set(floor.rooms);
+    roomSets.set(floor, set);
   }
   return set;
 }
@@ -133,6 +151,13 @@ export class AeroOffice {
   /** The pod data last handed to the page's area mappings. */
   private podsApplied: unknown = null;
 
+  /**
+   * The characters that are not on the floor on show: hidden (not drawn, hit, routed or counted) and holding no seat. A set of
+   * ids, kept in step by `syncMappings`, which every seat pick and every tick runs first.
+   */
+  private offFloor = new Set<number>();
+  private syncing = false;
+
   private cachedLayout: unknown = null;
   private cachedSeats: unknown = null;
   private nextPersonSlot = 0;
@@ -195,6 +220,11 @@ export class AeroOffice {
    */
   drive(ch: Character, dt: number, step: () => void): void {
     this.refresh();
+    // Not on the floor on show: it stands where it is, unseen, until its floor is back.
+    if (this.offFloor.has(ch.id)) {
+      this.leave(ch);
+      return;
+    }
     const update = this.enabled();
     if (ch.isSubagent || !update) {
       this.leave(ch);
@@ -305,9 +335,13 @@ export class AeroOffice {
   private occupied(except: number): Set<string> {
     const taken = new Set<string>();
     for (const other of this.os.characters.values()) {
-      if (other.id !== except) taken.add(key(other.tileCol, other.tileRow));
+      if (other.id !== except && !this.offFloor.has(other.id)) {
+        taken.add(key(other.tileCol, other.tileRow));
+      }
     }
-    for (const person of this.people) taken.add(key(person.ch.tileCol, person.ch.tileRow));
+    for (const person of this.people) {
+      if (this.personOnFloor(person)) taken.add(key(person.ch.tileCol, person.ch.tileRow));
+    }
     for (const [id, route] of this.routes) {
       if (id !== except) taken.add(key(route.target.col, route.target.row));
     }
@@ -503,14 +537,111 @@ export class AeroOffice {
   // ── Configured characters ───────────────────────────────────────
 
   /**
-   * Puts the mappings in force once per change of the pods: an accepted update with new pods hands them to the office (which
-   * reseats leads live), and one without pods after pods gives the server's mappings back. Without Aero's pods nothing here runs.
+   * Puts the floor and the mappings in force once per change: characters that are no longer on the floor give up their seats,
+   * an accepted update with new pods hands them to the office (which reseats leads live), and one without pods after pods gives
+   * the server's mappings back; then the characters that came back to the floor are seated by the mappings, at once. Without
+   * Aero's pods and floor nothing here runs.
    */
   syncMappings(): void {
-    const pods = getAeroUpdate()?.pods ?? null;
-    if (pods === this.podsApplied) return;
-    this.podsApplied = pods;
-    this.os.refreshMappings();
+    if (this.syncing) return;
+    this.syncing = true;
+    try {
+      const parked = this.parkOffFloor();
+      const pods = getAeroUpdate()?.pods ?? null;
+      if (pods !== this.podsApplied) {
+        this.podsApplied = pods;
+        this.os.refreshMappings();
+      }
+      const arrivals = this.arrivals;
+      this.arrivals = [];
+      this.os.placeArrivals(arrivals);
+      if (parked || arrivals.length > 0) this.os.refreshFurniture();
+    } finally {
+      this.syncing = false;
+    }
+  }
+
+  /** Characters whose floor came back since the last sync, in the order they are seated (leads, then the rest). */
+  private arrivals: Character[] = [];
+
+  // ── Floors ───────────────────────────────────────────────────────
+
+  /** Whether the directory `room` is on the floor on show; true for every room when the update has no floor. */
+  roomOnFloor(room: string | null | undefined): boolean {
+    const floor = getAeroUpdate()?.floor;
+    if (!floor) return true;
+    if (room === null) return true;
+    return room !== undefined && floorRooms(floor).has(room);
+  }
+
+  /**
+   * Whether `ch` is on the floor on show. A subagent and a teammate are where their lead is; a lead is on the floor of its
+   * directory name, and one with no directory name is on none. Every character is on the floor when the update has none.
+   */
+  private onFloor(ch: Character): boolean {
+    if (!getAeroUpdate()?.floor) return true;
+    let lead = ch;
+    if (ch.isSubagent) {
+      const parent = this.os.subagentMeta.get(ch.id)?.parentAgentId ?? ch.parentAgentId;
+      const found = parent == null ? undefined : this.os.characters.get(parent);
+      if (!found) return false;
+      lead = found;
+    }
+    if (lead.leadAgentId !== undefined) lead = this.os.characters.get(lead.leadAgentId) ?? lead;
+    return this.roomOnFloor(lead.directoryName ?? undefined);
+  }
+
+  private personOnFloor(person: Person): boolean {
+    return this.roomOnFloor(person.room);
+  }
+
+  /** Whether the character is on another floor than the one on show. */
+  isOffFloor(id: number): boolean {
+    return this.offFloor.has(id);
+  }
+
+  /** Whether `ch` is not drawn, hit-tested, routed or counted: a stock subagent a person stands in for, or a character of another floor. */
+  hides(ch: Character): boolean {
+    return ch.aeroHidden === true || this.offFloor.has(ch.id);
+  }
+
+  /**
+   * Finds who is off the floor now: those who just left give up their seats and route, those who are back are queued to be seated,
+   * and the selection, hover and camera follow drop a character that is off the floor. Returns whether anything changed.
+   */
+  private parkOffFloor(): boolean {
+    const os = this.os;
+    let changed = false;
+    for (const id of [...this.offFloor]) {
+      if (!os.characters.has(id)) this.offFloor.delete(id);
+    }
+    for (const ch of os.characters.values()) {
+      if (ch.matrixEffect === 'despawn') continue;
+      const off = !this.onFloor(ch);
+      const was = this.offFloor.has(ch.id);
+      if (off && !was) {
+        this.offFloor.add(ch.id);
+        this.dropRoute(ch.id);
+        os.releaseSeat(ch);
+        changed = true;
+      } else if (!off && was) {
+        this.offFloor.delete(ch.id);
+        this.arrivals.push(ch);
+        changed = true;
+      }
+    }
+    // Leads before the characters that sit near them.
+    this.arrivals.sort(
+      (a, b) => Number(a.leadAgentId !== undefined) - Number(b.leadAgentId !== undefined),
+    );
+    for (const id of [os.selectedAgentId, os.cameraFollowId, os.hoveredAgentId]) {
+      if (id !== null && this.offFloor.has(id)) {
+        if (os.selectedAgentId === id) os.selectedAgentId = null;
+        if (os.cameraFollowId === id) os.cameraFollowId = null;
+        if (os.hoveredAgentId === id) os.hoveredAgentId = null;
+      }
+    }
+    return changed;
   }
 
   /** Whether an accepted update's live pods are in force (the seat rules for the open office run only then). */
@@ -703,7 +834,7 @@ export class AeroOffice {
     const type = agentTypeFromStatus(status);
     if (type === null) return false;
     const lead = this.os.characters.get(parentId);
-    if (!lead) return false;
+    if (!lead || this.offFloor.has(parentId) || !this.onFloor(lead)) return false;
     // A project agent only for a lead in its room (preferred); the owner's agents (no room) for any lead.
     // One that is still spawning matches too; one that is despawning does not. (Two subagents of one type at once: the second
     // stays stock while the character is away.)
@@ -757,8 +888,8 @@ export class AeroOffice {
 
   /** The characters the renderer draws: `list` less the hidden stock subagents, plus the configured ones. */
   characters(list: Character[]): Character[] {
-    const shown = list.filter((ch) => !ch.aeroHidden);
-    for (const person of this.people) shown.push(person.ch);
+    const shown = list.filter((ch) => !this.hides(ch));
+    for (const person of this.people) if (this.personOnFloor(person)) shown.push(person.ch);
     return shown;
   }
 
@@ -840,6 +971,7 @@ export class AeroOffice {
           state: c.state,
           active: c.isActive,
           directoryName: c.directoryName ?? null,
+          shown: !this.hides(c),
         })),
       hidden: [...this.os.characters.values()].filter((c) => c.aeroHidden).map((c) => c.id),
       fxStarted: { ...this.fx.started },
@@ -884,6 +1016,8 @@ export interface AeroSnapshot {
     state: string;
     active: boolean;
     directoryName: string | null;
+    /** Drawn: not a hidden stock subagent and on the floor on show. */
+    shown: boolean;
   }>;
   hidden: number[];
   /** How many effects of each kind have started (counted, so a short one isn't missed by a poll). */

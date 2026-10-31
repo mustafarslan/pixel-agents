@@ -25,6 +25,7 @@ import type { Character } from '../office/types.js';
 import { CharacterState } from '../office/types.js';
 import { drawEffects } from './effects.js';
 import { fitCached } from './fit.js';
+import { drawFloorSign } from './floorSign.js';
 import { clockPlateRect, whiteboardRect } from './lounge.js';
 import { drawPods } from './pods.js';
 import { badgeText, clip } from './update.js';
@@ -181,11 +182,13 @@ export function drawAeroOverlay(
   drawPods(ctx, os, offsetX, offsetY, zoom);
   drawEffects(ctx, os.aero.fx, offsetX, offsetY, zoom);
   drawWall(ctx, os, offsetX, offsetY, zoom);
+  drawFloorSign(ctx, os, offsetX, offsetY, zoom);
 
   // Badges: the live subagents of each lead, also when it isn't hovered.
   for (const [parentId, count] of os.aero.badgeCounts()) {
     const lead = os.characters.get(parentId);
     if (!lead || lead.isSubagent || lead.matrixEffect === 'despawn' || count <= 0) continue;
+    if (os.aero.hides(lead)) continue;
     const top = spriteTop(lead);
     drawBadge(ctx, count, offsetX + (top.x + 7) * zoom, offsetY + (top.y + 3) * zoom, zoom);
   }
@@ -194,14 +197,14 @@ export function drawAeroOverlay(
   for (const route of os.aero.routes.keys()) {
     const text = os.aero.bubbleFor(route);
     const ch = os.characters.get(route);
-    if (!text || !ch) continue;
+    if (!text || !ch || os.aero.hides(ch)) continue;
     const top = spriteTop(ch);
     drawBubble(ctx, text, offsetX + top.x * zoom, offsetY + (top.y - 1) * zoom, zoom);
   }
 
   // The configured characters' names.
   for (const person of os.aero.people) {
-    if (person.ch.matrixEffect) continue;
+    if (person.ch.matrixEffect || !os.aero.roomOnFloor(person.room)) continue;
     const top = spriteTop(person.ch);
     drawName(ctx, person.name, offsetX + top.x * zoom, offsetY + (top.y - 1) * zoom, zoom);
   }
