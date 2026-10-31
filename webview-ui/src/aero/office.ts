@@ -29,7 +29,7 @@ import {
   wallHit,
   whiteboardRect,
 } from './lounge.js';
-import { type AeroUpdate, agentTypeFromStatus, parseAeroUpdate } from './update.js';
+import { type AeroPods, type AeroUpdate, agentTypeFromStatus, parseAeroUpdate } from './update.js';
 
 // ── The last update ────────────────────────────────────────────────
 
@@ -45,6 +45,14 @@ export function setAeroUpdate(raw: unknown): boolean {
 
 export function getAeroUpdate(): AeroUpdate | null {
   return latest;
+}
+
+/**
+ * Whether the server's own area mappings (`areaMappingsLoaded`) may replace the page's: not while an accepted update carries
+ * live pod mappings.
+ */
+export function serverMappingsAllowed(): boolean {
+  return !latest?.pods;
 }
 
 /** @internal for tests */
@@ -117,6 +125,9 @@ export class AeroOffice {
   /** Lounge floor tiles a character can walk on (not blocked). */
   loungeWalkable: Tile[] = [];
   rng: () => number = Math.random;
+
+  /** The pod data last handed to the page's area mappings. */
+  private podsApplied: unknown = null;
 
   private cachedLayout: unknown = null;
   private cachedSeats: unknown = null;
@@ -487,8 +498,20 @@ export class AeroOffice {
 
   // ── Configured characters ───────────────────────────────────────
 
+  /**
+   * Hands an accepted update's pod mappings to the office once per new update, which reseats leads live. An update without
+   * pods leaves the mappings as they are (the stock server's own).
+   */
+  syncMappings(): void {
+    const pods = getAeroUpdate()?.pods;
+    if (!pods || pods === this.podsApplied) return;
+    this.podsApplied = pods;
+    this.os.setAreaMappings(pods.mappings);
+  }
+
   /** Once a tick, after every character stepped. */
   afterTick(dt: number): void {
+    this.syncMappings();
     this.refresh();
     this.clock += dt;
     const update = this.enabled();
@@ -737,6 +760,17 @@ export class AeroOffice {
       counts.set(meta.parentAgentId, (counts.get(meta.parentAgentId) ?? 0) + 1);
     }
     return counts;
+  }
+
+  /** The live pod data of the last accepted update, or null (an update without pods, or none). */
+  currentPods(): AeroPods | null {
+    return getAeroUpdate()?.pods ?? null;
+  }
+
+  /** The area labels whose text the pods draw, so the stock area labels leave them out. */
+  podLabelKeys(): ReadonlySet<string> | undefined {
+    const pods = getAeroUpdate()?.pods;
+    return pods ? new Set(Object.keys(pods.labels)) : undefined;
   }
 
   /** The last accepted update. */

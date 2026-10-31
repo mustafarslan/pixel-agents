@@ -1,5 +1,5 @@
 /**
- * Aero's seventeen furniture pieces: each sprite is a whole picture of its size, the merge adds them to the server's catalog
+ * Aero's eighteen furniture pieces: each sprite is a whole picture of its size, the merge adds them to the server's catalog
  * without touching a stock entry or the message, a bad catalog never throws, and a layout that names them draws them
  * and blocks the right tiles.
  */
@@ -50,8 +50,9 @@ const IDS = [
   'AERO_BALCONY_RAILING',
   'AERO_BALCONY_RAILING_SIDE',
   'AERO_ASHTRAY_STAND',
+  'AERO_ELEVATOR',
 ];
-/** The category of each of the eleven newer pieces. */
+/** The category of each of the twelve newer pieces. */
 const CATEGORIES: Record<string, string> = {
   AERO_WATERCOOLER: 'misc',
   AERO_POD_WHITEBOARD: 'decor',
@@ -64,6 +65,7 @@ const CATEGORIES: Record<string, string> = {
   AERO_BALCONY_RAILING: 'decor',
   AERO_BALCONY_RAILING_SIDE: 'decor',
   AERO_ASHTRAY_STAND: 'misc',
+  AERO_ELEVATOR: 'misc',
 };
 /** The sizes the plan fixes: [width, height, footprintW, footprintH, backgroundTiles]. */
 const SIZES: Record<string, number[]> = {
@@ -84,6 +86,7 @@ const SIZES: Record<string, number[]> = {
   AERO_BALCONY_RAILING: [16, 16, 1, 1, 0],
   AERO_BALCONY_RAILING_SIDE: [16, 16, 1, 1, 0],
   AERO_ASHTRAY_STAND: [16, 32, 1, 2, 1],
+  AERO_ELEVATOR: [32, 32, 2, 2, 1],
 };
 
 // A stand-in for what the server sends: one flat grey stock piece.
@@ -108,7 +111,7 @@ function stockSprites(): Record<string, SpriteData> {
   return { WHITEBOARD: Array.from({ length: 32 }, () => new Array<string>(16).fill(GREY)) };
 }
 
-test('the seventeen grids are whole: the right size, only palette characters, drawn in every tile', () => {
+test('the eighteen grids are whole: the right size, only palette characters, drawn in every tile', () => {
   const sprites = buildAeroSprites();
   assert.deepEqual(Object.keys(sprites).sort(), [...IDS].sort());
   for (const id of IDS) {
@@ -240,7 +243,7 @@ test('the entries carry the plan sizes, a category that is never chairs, and no 
   }
 });
 
-test('the merge adds all seventeen, leaves the stock entry and its sprite alone, and never changes its inputs', () => {
+test('the merge adds all eighteen, leaves the stock entry and its sprite alone, and never changes its inputs', () => {
   const catalog = stockCatalog();
   const sprites = stockSprites();
   const before = JSON.stringify({ catalog, sprites });
@@ -342,7 +345,7 @@ test('a layout naming the first six draws them and blocks their tiles by footpri
   assert.equal(blocked.size, 4 + 4 + 2);
 });
 
-test('a layout naming all seventeen blocks exactly the footprint rows below each background row', () => {
+test('a layout naming all eighteen blocks exactly the footprint rows below each background row', () => {
   const m = withAeroFurniture(stockCatalog(), stockSprites());
   buildDynamicCatalog({ catalog: m.catalog, sprites: m.sprites });
   const furniture: PlacedFurniture[] = IDS.map((type, i) => ({
@@ -456,4 +459,21 @@ test('the hook fields the self-test reads: desk and wall flags, uniform rows, pa
     const inPalette = getCatalogByCategory(entry.category).some((e) => e.type === id);
     assert.equal(inPalette, id !== 'AERO_BALCONY_RAILING_SIDE', `${id} palette`);
   }
+});
+
+test('the lift is 2x2 with one background row, category misc, and is not a chair, desk or electronics piece', () => {
+  const lift = aeroFurnitureCatalog().find((e) => e.id === 'AERO_ELEVATOR');
+  assert.ok(lift);
+  assert.deepEqual(
+    [lift.width, lift.height, lift.footprintW, lift.footprintH, lift.backgroundTiles],
+    [32, 32, 2, 2, 1],
+  );
+  assert.equal(lift.category, 'misc');
+  assert.equal(lift.isDesk, false);
+  assert.equal(lift.canPlaceOnSurfaces, false);
+  // Doors below, a floor indicator above: both halves carry the picture, and the doors have a seam down the middle.
+  const grid = AERO_SPRITE_GRIDS['AERO_ELEVATOR'];
+  assert.ok(grid);
+  assert.notEqual(grid.map.slice(0, 16).join(''), grid.map.slice(16).join(''));
+  assert.ok(grid.map.slice(17, 29).every((row) => row.slice(15, 17) === 'qq'));
 });

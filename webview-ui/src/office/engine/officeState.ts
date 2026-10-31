@@ -121,8 +121,79 @@ export class OfficeState {
    *  overlay's per-frame updates stop re-centering. Reset on spawn/despawn. */
   private greeterCameraCancelled = false;
 
+  /**
+   * Takes new mappings and, for Aero's live pods, reseats: a lead seated outside its mapped area walks to a free seat inside
+   * it, when there is one (a full pod never causes reseating). A lead resting on an Aero route only has its seat swapped: it
+   * walks to the new one when it goes home.
+   */
   setAreaMappings(mappings: Record<string, string[]>): void {
     this.areaMappings = mappings;
+    const electronicsTiles = this.buildElectronicsTileSet();
+    for (const ch of [...this.characters.values()]) {
+      if (ch.isSubagent || ch.leadAgentId !== undefined || ch.matrixEffect === 'despawn') continue;
+      const target = this.betterSeatInMappedArea(ch, electronicsTiles);
+      if (!target) continue;
+      if (this.aero.routes.has(ch.id)) {
+        const old = ch.seatId ? this.seats.get(ch.seatId) : undefined;
+        if (old) old.assigned = false;
+        this.seats.get(target)!.assigned = true;
+        ch.seatId = target;
+      } else {
+        this.reassignSeat(ch.id, target);
+      }
+    }
+  }
+
+  /** The area labels `directoryName` is mapped to, or null when it has none. */
+  private mappedAreas(directoryName: string | undefined): Set<string> | null {
+    if (!directoryName || !Object.prototype.hasOwnProperty.call(this.areaMappings, directoryName)) {
+      return null;
+    }
+    const labels = this.areaMappings[directoryName];
+    return Array.isArray(labels) && labels.length > 0 ? new Set(labels) : null;
+  }
+
+  /**
+   * Aero: a free seat inside the character's mapped area when its own seat is outside that area, else null. A character with
+   * no mapping, a seat already inside, or no free seat inside (a full pod) keeps what it has.
+   */
+  private betterSeatInMappedArea(
+    ch: Character,
+    electronicsTiles: Set<string>,
+    seatId: string | null = ch.seatId,
+  ): string | null {
+    const wanted = this.mappedAreas(ch.directoryName);
+    if (!wanted) return null;
+    const zone = seatId ? this.seatZone(seatId) : null;
+    if (zone !== null && wanted.has(zone)) return null;
+    const free: string[] = [];
+    for (const [uid, seat] of this.seats) {
+      if (seat.assigned) continue;
+      const label = this.seatZone(uid);
+      if (label !== null && wanted.has(label)) free.push(uid);
+    }
+    return this.pickFromSeats(free, electronicsTiles, true);
+  }
+
+  /**
+   * Aero: the free seat closest to a lead's seat, inside the lead's seat zone while that zone has one; only when it has none,
+   * the old behaviour (closest anywhere). Returns the zone it limited to, or null when it didn't.
+   */
+  private closestFreeSeatInZone(
+    anchor: { col: number; row: number },
+    leadSeatId: string | null | undefined,
+  ): { seatId: string | null; zone: string | null } {
+    const zone = leadSeatId ? this.seatZone(leadSeatId) : null;
+    if (zone !== null) {
+      const inZone = closestFreeSeat(
+        this.seats,
+        anchor.col,
+        anchor.row,
+        (uid) => this.seatZone(uid) === zone,
+      );
+      if (inZone) return { seatId: inZone, zone };
+    }
+    return { seatId: closestFreeSeat(this.seats, anchor.col, anchor.row), zone: null };
   }
 
   constructor(layout?: OfficeLayout) {
@@ -194,6 +265,16 @@ export class OfficeState {
         }
       }
       ch.seatId = null; // will be reassigned below
+    }
+
+    // Aero: a kept seat outside the character's mapped area is dropped, only when a free seat inside the area exists.
+    const keptElectronics = this.buildElectronicsTileSet();
+    for (const ch of this.characters.values()) {
+      if (!ch.seatId || ch.isSubagent || ch.leadAgentId !== undefined) continue;
+      const better = this.betterSeatInMappedArea(ch, keptElectronics);
+      if (!better) continue;
+      this.seats.get(ch.seatId)!.assigned = false;
+      ch.seatId = null; // seated again in the pass below
     }
 
     // Second pass: assign remaining characters to free seats
@@ -345,7 +426,11 @@ export class OfficeState {
    * Random-pick a seat from a candidate list, biased toward seats that face an
    * electronics tile. Returns null when the candidate list is empty.
    */
-  private pickFromSeats(seatUids: string[], electronicsTiles: Set<string>): string | null {
+  private pickFromSeats(
+    seatUids: string[],
+    electronicsTiles: Set<string>,
+    preferBench = false,
+  ): string | null {
     if (seatUids.length === 0) return null;
     const pcSeats: string[] = [];
     const otherSeats: string[] = [];
@@ -357,6 +442,13 @@ export class OfficeState {
       } else {
         otherSeats.push(uid);
       }
+    }
+    if (preferBench && pcSeats.length > 0) {
+      // Aero: a pod's lead takes the cushioned bench at the PC; the wooden benches stay for its subagents.
+      const types = new Map<string, string>();
+      for (const item of this.layout.furniture) types.set(item.uid, item.type);
+      const benches = pcSeats.filter((uid) => types.get(uid) === 'CUSHIONED_BENCH');
+      if (benches.length > 0) return benches[Math.floor(Math.random() * benches.length)];
     }
     if (pcSeats.length > 0) return pcSeats[Math.floor(Math.random() * pcSeats.length)];
     if (otherSeats.length > 0) return otherSeats[Math.floor(Math.random() * otherSeats.length)];
@@ -385,6 +477,8 @@ export class OfficeState {
     }
     if (freeSeats.length === 0) return null;
 
+    // Aero's live pods may have changed the mappings since the last tick.
+    this.aero.syncMappings();
     const areaLabels = directoryName ? this.areaMappings[directoryName] : undefined;
 
     // Stage 1 — in-area seats for the Directory's mapped Area labels.
@@ -394,7 +488,7 @@ export class OfficeState {
         const label = this.seatZone(uid);
         return label !== null && wanted.has(label);
       });
-      const pick = this.pickFromSeats(inArea, electronicsTiles);
+      const pick = this.pickFromSeats(inArea, electronicsTiles, true);
       if (pick) return pick;
     }
 
@@ -471,14 +565,22 @@ export class OfficeState {
     const anchor = nearAgentId !== undefined ? this.characters.get(nearAgentId) : undefined;
     const anchorAt = anchorTile(anchor, this.seats);
     let seatId: string | null = null;
+    this.aero.syncMappings();
     if (preferredSeatId && this.seats.has(preferredSeatId)) {
       const seat = this.seats.get(preferredSeatId)!;
       if (!seat.assigned) {
         seatId = preferredSeatId;
+        // Aero: a restored seat outside the agent's mapped area is dropped, only when a free seat inside the area exists.
+        if (!anchor && directoryName) {
+          const probe = { directoryName } as Character;
+          if (this.betterSeatInMappedArea(probe, this.buildElectronicsTileSet(), seatId)) {
+            seatId = null;
+          }
+        }
       }
     }
     if (!seatId && anchorAt) {
-      seatId = closestFreeSeat(this.seats, anchorAt.col, anchorAt.row);
+      seatId = this.closestFreeSeatInZone(anchorAt, anchor?.seatId).seatId;
     }
     if (!seatId) {
       seatId = this.findFreeSeat(directoryName);
@@ -664,8 +766,13 @@ export class OfficeState {
     if (!teammate || !lead) return;
     const anchorAt = anchorTile(lead, this.seats);
     if (!anchorAt) return;
-    const target = closestFreeSeat(this.seats, anchorAt.col, anchorAt.row);
+    const { seatId: target, zone } = this.closestFreeSeatInZone(anchorAt, lead.seatId);
     if (!target || target === teammate.seatId) return;
+    // Aero: a teammate seated outside its lead's zone moves into it while the zone has a free seat.
+    if (zone !== null && (teammate.seatId ? this.seatZone(teammate.seatId) : null) !== zone) {
+      this.reassignSeat(teammateId, target);
+      return;
+    }
     const targetSeat = this.seats.get(target)!;
     const targetDist =
       Math.abs(targetSeat.seatCol - anchorAt.col) + Math.abs(targetSeat.seatRow - anchorAt.row);

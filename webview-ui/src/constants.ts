@@ -574,3 +574,10 @@ export const AERO_BOARD_ALERT = '#c0392b';
 export const AERO_PLATE_FILL = '#20202c';
 export const AERO_PLATE_BORDER = '#8a8aa0';
 export const AERO_PLATE_TEXT = '#f4f1de';
+
+// ── Aero's live pods ─────────────────────────────────────────────
+/** The wash over a pod with no live Claude. */
+export const AERO_POD_DIM_COLOR = '#0a0a1e';
+export const AERO_POD_DIM_ALPHA = 0.38;
+/** A dimmed pod's name is drawn fainter. */
+export const AERO_POD_DIM_LABEL_ALPHA = 0.5;

@@ -4,12 +4,38 @@
  * It is untrusted text (agent names, a meeting title), so it is validated strictly: exactly these keys, exactly these
  * types and caps. Anything else is rejected whole, and the page keeps the last update it accepted. The page draws
  * these strings with canvas `fillText` only, never as HTML.
+ *
+ * The exact JSON (`pods` is the open office's live pod data; it is optional, and `null` means the same as absent):
+ *
+ *   {
+ *     "lunch": false,
+ *     "meeting": { "time": "14:30", "title": "Design review", "soon": false } | null,
+ *     "inbox": 3,
+ *     "agents": [ { "name": "Code Reviewer", "slug": "code-reviewer", "room": "<12 hex>"? } ],
+ *     "lounge": true,
+ *     "pods": {
+ *       "mappings": { "<directoryName>": ["Pod 1"], "<directoryName>": ["Hot desks"], ... },
+ *       "labels":   { "Pod 1": { "name": "feat-auth", "dim": false }, "Pod 2": { "name": "", "dim": true }, ... }
+ *     }
+ *   }
+ *
+ * - `mappings`: at most 32 keys (14 worktrees and the fixed ones); a key is a directory name (1..40 characters), its value
+ *   1..4 area labels (1..40 characters each, no duplicates). The page uses them as its slug to area mappings while an
+ *   accepted update carries them.
+ * - `labels`: at most 16 keys, each an area label (1..40 characters). `name` is what the pod is drawn with (0..40
+ *   characters; empty means a pod with no worktree: no text), `dim` whether it has no live Claude (drawn dimmed).
+ * - Strings have no control, format or line-separator characters. Keys are exactly these; nothing else is accepted.
  */
 
 export const MAX_AGENTS = 8;
 export const MAX_NAME_CHARS = 40;
 export const MAX_TITLE_CHARS = 60;
 export const MAX_INBOX = 99_999;
+/** Pod data: 14 worktrees and the fixed ones. */
+export const MAX_POD_MAPPINGS = 32;
+export const MAX_AREAS_PER_MAPPING = 4;
+export const MAX_POD_LABELS = 16;
+export const MAX_LABEL_CHARS = 40;
 
 export interface AeroAgent {
   /** What the character is labelled with. */
@@ -31,6 +57,20 @@ export interface AeroMeeting {
   soon: boolean;
 }
 
+export interface AeroPodLabel {
+  /** What the pod is drawn with; empty for a pod with no worktree (no text). */
+  name: string;
+  /** No live Claude in this pod: drawn dimmed. */
+  dim: boolean;
+}
+
+export interface AeroPods {
+  /** directoryName to the area labels it sits in. */
+  mappings: Record<string, string[]>;
+  /** Area label to what is drawn there. */
+  labels: Record<string, AeroPodLabel>;
+}
+
 export interface AeroUpdate {
   /** True from 12:00 to 13:00 by the Mac's clock (Aero computes it: the page has no clock of its own). */
   lunch: boolean;
@@ -39,9 +79,12 @@ export interface AeroUpdate {
   agents: AeroAgent[];
   /** Whether the layout has Aero's Lounge. */
   lounge: boolean;
+  /** The open office's live pods. Absent when the update carries none. */
+  pods?: AeroPods;
 }
 
 const KEYS = ['agents', 'inbox', 'lounge', 'lunch', 'meeting'];
+const KEYS_WITH_PODS = [...KEYS, 'pods'].sort();
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const ROOM_RE = /^[0-9a-f]{12}$/;
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -69,10 +112,55 @@ function cleanText(value: unknown, max: number, allowEmpty = false): string | nu
   return value;
 }
 
+/** The pod data, or null when it isn't exactly the shape above. */
+function parsePods(raw: unknown): AeroPods | null {
+  if (!isPlainObject(raw) || !hasKeys(raw, ['labels', 'mappings'])) return null;
+  const { mappings, labels } = raw;
+  if (!isPlainObject(mappings) || !isPlainObject(labels)) return null;
+  const mappingKeys = Object.keys(mappings);
+  const labelKeys = Object.keys(labels);
+  if (mappingKeys.length > MAX_POD_MAPPINGS || labelKeys.length > MAX_POD_LABELS) return null;
+
+  const parsedMappings: Record<string, string[]> = {};
+  for (const key of mappingKeys) {
+    if (key === '__proto__' || cleanText(key, MAX_LABEL_CHARS) === null) return null;
+    const value = mappings[key];
+    if (!Array.isArray(value) || value.length < 1 || value.length > MAX_AREAS_PER_MAPPING) {
+      return null;
+    }
+    const areas: string[] = [];
+    for (const area of value) {
+      const text = cleanText(area, MAX_LABEL_CHARS);
+      if (text === null || areas.includes(text)) return null;
+      areas.push(text);
+    }
+    parsedMappings[key] = areas;
+  }
+
+  const parsedLabels: Record<string, AeroPodLabel> = {};
+  for (const key of labelKeys) {
+    if (key === '__proto__' || cleanText(key, MAX_LABEL_CHARS) === null) return null;
+    const entry = labels[key];
+    if (!isPlainObject(entry) || !hasKeys(entry, ['dim', 'name'])) return null;
+    if (typeof entry.dim !== 'boolean') return null;
+    const name = cleanText(entry.name, MAX_LABEL_CHARS, true);
+    if (name === null) return null;
+    parsedLabels[key] = { name, dim: entry.dim };
+  }
+  return { mappings: parsedMappings, labels: parsedLabels };
+}
+
 /** The update, or null when it isn't exactly the shape above. */
 export function parseAeroUpdate(raw: unknown): AeroUpdate | null {
-  if (!isPlainObject(raw) || !hasKeys(raw, KEYS)) return null;
+  if (!isPlainObject(raw)) return null;
+  const withPods = hasKeys(raw, KEYS_WITH_PODS);
+  if (!withPods && !hasKeys(raw, KEYS)) return null;
   const { lunch, lounge, inbox, meeting, agents } = raw;
+  let pods: AeroPods | null = null;
+  if (withPods && raw.pods !== null) {
+    pods = parsePods(raw.pods);
+    if (pods === null) return null;
+  }
   if (typeof lunch !== 'boolean' || typeof lounge !== 'boolean') return null;
   if (typeof inbox !== 'number' || !Number.isInteger(inbox) || inbox < 0 || inbox > MAX_INBOX) {
     return null;
@@ -110,7 +198,15 @@ export function parseAeroUpdate(raw: unknown): AeroUpdate | null {
     );
   }
 
-  return { lunch, meeting: parsedMeeting, inbox, agents: parsedAgents, lounge };
+  const update: AeroUpdate = {
+    lunch,
+    meeting: parsedMeeting,
+    inbox,
+    agents: parsedAgents,
+    lounge,
+  };
+  if (pods !== null) update.pods = pods;
+  return update;
 }
 
 /**

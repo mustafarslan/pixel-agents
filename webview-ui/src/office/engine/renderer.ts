@@ -237,6 +237,7 @@ export function renderAreaLabels(
   offsetX: number,
   offsetY: number,
   zoom: number,
+  hiddenLabels?: ReadonlySet<string>,
 ): void {
   if (!areaTiles || areaTiles.length === 0) return;
   if (!areas || areas.length === 0) return;
@@ -251,6 +252,7 @@ export function renderAreaLabels(
     for (let c = 0; c < cols; c++) {
       const label = areaTiles[r * cols + c];
       if (!label) continue;
+      if (hiddenLabels?.has(label)) continue; // Aero draws these itself (live pod names)
       const acc = centroids.get(label);
       if (acc) {
         acc.sumX += c;
@@ -870,6 +872,7 @@ export function renderFrame(
   showAreas?: boolean,
   activeAreaLabel?: string | null,
   pets?: Pet[],
+  hiddenAreaLabels?: ReadonlySet<string>,
 ): { offsetX: number; offsetY: number } {
   // Clear
   ctx.clearRect(0, 0, canvasWidth, canvasHeight);
@@ -936,7 +939,7 @@ export function renderFrame(
 
   // Area labels (above bubbles + characters, below editor overlays)
   if (showAreas) {
-    renderAreaLabels(ctx, areaTiles, areas, cols, rows, offsetX, offsetY, zoom);
+    renderAreaLabels(ctx, areaTiles, areas, cols, rows, offsetX, offsetY, zoom, hiddenAreaLabels);
   }
 
   // Editor overlays

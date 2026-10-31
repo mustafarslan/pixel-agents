@@ -799,7 +799,55 @@ const ASHTRAY_STAND: AeroSpriteGrid = {
   },
 };
 
-/** The seventeen grids by catalog id. */
+const ELEVATOR: AeroSpriteGrid = {
+  map: [
+    '................................',
+    '..oooooooooooooooooooooooooooo..',
+    '..oggggggggggggggggggggggggggo..',
+    '..oggggggggggggggggggggggggggo..',
+    '..ollllllloooooooooooolllllllo..',
+    '..olllllllokyyyyykkGkolllllllo..',
+    '..olllllllokkkkykkGGGolllllllo..',
+    '..olllllllokyyyyykkGkolllllllo..',
+    '..olllllllokykkkkkkGkolllllllo..',
+    '..olllllllokyyyyykkkkolllllllo..',
+    '..ollllllloooooooooooolllllllo..',
+    '..oggggggggggggggggggggggggggo..',
+    '..oggggggggggggggggggggggggggo..',
+    '..oggggggggggggggggggggggggggo..',
+    '..oggggggggggggggggggggggggggo..',
+    '..oooooooooooooooooooooooooooo..',
+    '..omoooooooooooooooooooooooomo..',
+    '..omlgggggggggmqqlgggggggggmmo..',
+    '..omlgggggggggmqqlgggggggggmmo..',
+    '..omlwggggggggmqqlgggggggwgmmo..',
+    '..omlwggggggggmqqlgggggggwgmmo..',
+    '..omlwggggggggmqqlgggggggwgmmo..',
+    '..omlwggggggggmqqlgggggggwgmmo..',
+    '..omlwggggggggmqqlgggggggwgmmo..',
+    '..omlwggggggggmqqlgggggggwgmmo..',
+    '..omlwggggggggmqqlgggggggwgmmo..',
+    '..omlwggggggggmqqlgggggggwgmmo..',
+    '..omlwggggggggmqqlgggggggwgmmo..',
+    '..omlgggggggggmqqlgggggggggmmo..',
+    '..ommmmmmmmmmmmmmmmmmmmmmmmmmo..',
+    '..oooooooooooooooooooooooooooo..',
+    '................................',
+  ],
+  palette: {
+    o: '#3f3740',
+    l: '#e1e3e9',
+    g: '#b5bfc7',
+    w: '#ffffff',
+    m: '#757b7c',
+    q: '#535568',
+    k: '#10102a',
+    y: '#e8a33a',
+    G: '#58c05f',
+  },
+};
+
+/** The eighteen grids by catalog id. */
 export const AERO_SPRITE_GRIDS: Readonly<Record<string, AeroSpriteGrid>> = {
   AERO_TOILET: TOILET,
   AERO_SINK: SINK,
@@ -818,6 +866,7 @@ export const AERO_SPRITE_GRIDS: Readonly<Record<string, AeroSpriteGrid>> = {
   AERO_BALCONY_RAILING: BALCONY_RAILING,
   AERO_BALCONY_RAILING_SIDE: BALCONY_RAILING_SIDE,
   AERO_ASHTRAY_STAND: ASHTRAY_STAND,
+  AERO_ELEVATOR: ELEVATOR,
 };
 
 /** A grid as the page's `SpriteData`: rows of `#rrggbb`, with `''` for clear. A character outside the palette is clear. */
@@ -827,7 +876,7 @@ export function gridToSprite(grid: AeroSpriteGrid): SpriteData {
   );
 }
 
-/** The seventeen sprites by catalog id. */
+/** The eighteen sprites by catalog id. */
 export function buildAeroSprites(): Record<string, SpriteData> {
   const out: Record<string, SpriteData> = {};
   for (const [id, grid] of Object.entries(AERO_SPRITE_GRIDS)) out[id] = gridToSprite(grid);

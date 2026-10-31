@@ -26,6 +26,7 @@ import { CharacterState } from '../office/types.js';
 import { drawEffects } from './effects.js';
 import { fitCached } from './fit.js';
 import { clockPlateRect, whiteboardRect } from './lounge.js';
+import { drawPods } from './pods.js';
 import { badgeText, clip } from './update.js';
 
 const FONT = "'FS Pixel Sans', monospace";
@@ -177,6 +178,7 @@ export function drawAeroOverlay(
 ): void {
   ctx.save();
   // The effects first: the text of the wall objects, the badges and the names stay readable over them.
+  drawPods(ctx, os, offsetX, offsetY, zoom);
   drawEffects(ctx, os.aero.fx, offsetX, offsetY, zoom);
   drawWall(ctx, os, offsetX, offsetY, zoom);
 
