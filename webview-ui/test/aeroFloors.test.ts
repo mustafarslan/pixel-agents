@@ -210,6 +210,11 @@ test('a lead of another floor is hidden, holds no seat and is not hit; its floor
   assert.deepEqual(seated(os), [ch(os, 1).seatId], 'the seat is free');
   assert.equal(ch(os, 1).seatId!.startsWith('p1-'), true);
   const hidden = ch(os, 2);
+  // It stands where it was parked, which can be the seat the lead on the floor picked at random: put it on ground of its own.
+  hidden.tileCol = 15;
+  hidden.tileRow = 6;
+  hidden.x = 15 * 16 + 8;
+  hidden.y = 6 * 16 + 8;
   assert.equal(os.getCharacterAt(hidden.x, hidden.y - 4), null, 'not hit-tested');
   const visible = ch(os, 1);
   assert.equal(os.getCharacterAt(visible.x, visible.y - 4), 1);

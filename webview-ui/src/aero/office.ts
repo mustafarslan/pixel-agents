@@ -550,8 +550,11 @@ export class AeroOffice {
       const parked = this.parkOffFloor();
       const pods = getAeroUpdate()?.pods ?? null;
       if (pods !== this.podsApplied) {
+        const first = this.podsApplied === null && pods !== null;
         this.podsApplied = pods;
         this.os.refreshMappings();
+        // Leads seated before the pods were in force take their pod's bench now.
+        if (first) this.os.upgradeToBenches();
       }
       const arrivals = this.arrivals;
       this.arrivals = [];

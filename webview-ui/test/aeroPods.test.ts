@@ -715,3 +715,34 @@ test('the area labels leave out the hidden ones and draw the others', () => {
   drawAreaLabels(ctx, layout.areaTiles, layout.areas, COLS, ROWS, 0, 0, 2, new Set(['Pod 1']));
   assert.deepEqual([...new Set(calls)], ['Pod 2']);
 });
+
+test('a lead restored before the pods are in force takes its pod bench when they come', () => {
+  for (let i = 0; i < 20; i++) {
+    const os = build();
+    // The server's mappings are in force first, and the restored seat is one the layout doesn't have.
+    os.setAreaMappings({ lead: ['Pod 1'] });
+    os.addAgent(1, 0, 0, 'a-seat-of-an-older-layout', true, 'lead');
+    const before = os.characters.get(1)!.seatId!;
+    assert.ok(POD1.includes(before), `seated in its pod first (${before})`);
+    force({ lead: ['Pod 1'] });
+    os.update(0.1);
+    const ch = os.characters.get(1)!;
+    assert.equal(ch.seatId, 'p1-bench');
+    assert.deepEqual([ch.tileCol, ch.tileRow], [1, 3], 'at once, not walking');
+    assert.equal(ch.state, CharacterState.TYPE);
+    assert.equal(os.seats.get(before)!.assigned, before === 'p1-bench');
+    assert.equal([...os.seats.values()].filter((s) => s.assigned).length, 1);
+  }
+});
+
+test('the bench upgrade leaves a lead whose bench is taken, or that is outside its area, where it is', () => {
+  const os = build();
+  os.setAreaMappings({ a: ['Pod 1'], b: ['Pod 1'] });
+  os.addAgent(1, 0, 0, 'p1-bench', true, 'a');
+  os.addAgent(2, 0, 0, 'p1-wood-a', true, 'b');
+  os.addAgent(3, 0, 0, 'p2-wood-a', true, 'a2');
+  force({ a: ['Pod 1'], b: ['Pod 1'], a2: ['Pod 1'] });
+  os.update(0.1);
+  assert.equal(os.characters.get(1)!.seatId, 'p1-bench');
+  assert.equal(os.characters.get(2)!.seatId, 'p1-wood-a', "the bench is the other lead's");
+});

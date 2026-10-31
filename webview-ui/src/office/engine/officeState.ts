@@ -264,20 +264,60 @@ export class OfficeState {
       if (!seatId || !seat) continue;
       seat.assigned = true;
       ch.seatId = seatId;
-      ch.tileCol = seat.seatCol;
-      ch.tileRow = seat.seatRow;
-      ch.x = seat.seatCol * TILE_SIZE + TILE_SIZE / 2;
-      ch.y = seat.seatRow * TILE_SIZE + TILE_SIZE / 2;
-      ch.dir = seat.facingDir;
-      ch.path = [];
-      ch.moveProgress = 0;
-      ch.state = CharacterState.TYPE;
-      ch.frame = 0;
-      ch.frameTimer = 0;
-      if (!ch.isActive) {
-        ch.seatTimer = INACTIVE_SEAT_TIMER_MIN_SEC + Math.random() * INACTIVE_SEAT_TIMER_RANGE_SEC;
-      }
+      this.snapToSeat(ch, seat);
     }
+  }
+
+  /** Aero: puts `ch` on `seat` at once (no walking), sitting. */
+  private snapToSeat(ch: Character, seat: Seat): void {
+    ch.tileCol = seat.seatCol;
+    ch.tileRow = seat.seatRow;
+    ch.x = seat.seatCol * TILE_SIZE + TILE_SIZE / 2;
+    ch.y = seat.seatRow * TILE_SIZE + TILE_SIZE / 2;
+    ch.dir = seat.facingDir;
+    ch.path = [];
+    ch.moveProgress = 0;
+    ch.state = CharacterState.TYPE;
+    ch.frame = 0;
+    ch.frameTimer = 0;
+    if (!ch.isActive) {
+      ch.seatTimer = INACTIVE_SEAT_TIMER_MIN_SEC + Math.random() * INACTIVE_SEAT_TIMER_RANGE_SEC;
+    }
+  }
+
+  /**
+   * Aero: the first time live pods come in force, a lead that was seated before them (a restored agent takes whatever seat of its
+   * area the stock picker gave it, because the bench rule runs only while pods are in force) moves to its pod's free cushioned
+   * bench at the PC, at once. Only a lead already inside its mapped area, and only to a free bench there.
+   */
+  upgradeToBenches(): void {
+    const electronicsTiles = this.buildElectronicsTileSet();
+    const types = new Map<string, string>();
+    for (const item of this.layout.furniture) types.set(item.uid, item.type);
+    for (const ch of this.reseatableLeads()) {
+      if (!ch.seatId || types.get(ch.seatId) === 'CUSHIONED_BENCH' || this.aero.routes.has(ch.id))
+        continue;
+      if (this.aero.isOffFloor(ch.id)) continue;
+      const wanted = this.mappedAreas(ch.directoryName);
+      if (!wanted) continue;
+      const unzoned = this.wantsUnzoned(wanted);
+      if (!this.zoneWanted(this.seatZone(ch.seatId), wanted, unzoned)) continue;
+      const benches = [...this.seats].filter(
+        ([uid, seat]) =>
+          !seat.assigned &&
+          types.get(uid) === 'CUSHIONED_BENCH' &&
+          this.zoneWanted(this.seatZone(uid), wanted, unzoned) &&
+          this.isSeatFacingElectronics(seat, electronicsTiles),
+      );
+      if (benches.length === 0) continue;
+      const [uid, bench] = benches[Math.floor(Math.random() * benches.length)];
+      const old = this.seats.get(ch.seatId);
+      if (old) old.assigned = false;
+      bench.assigned = true;
+      ch.seatId = uid;
+      this.snapToSeat(ch, bench);
+    }
+    this.rebuildFurnitureInstances();
   }
 
   /** Aero: the PCs that are on follow the seats as they are now. */
