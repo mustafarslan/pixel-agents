@@ -23,6 +23,11 @@ export interface LoungeItem {
 
 /** A Lounge piece, as Aero's `OfficeLayout` names it. */
 export const LOUNGE_ITEM_RE = /^aero-[0-9a-f]{8}-lounge-\d+$/;
+/**
+ * A Meeting Room piece (the Big office style). Used only to find the whiteboard and the clock when the Lounge has none;
+ * the Lounge's label vote, seats, table and floor never see these.
+ */
+export const MEETING_ITEM_RE = /^aero-[0-9a-f]{8}-meeting-\d+$/;
 /** A seat of one: the chair's uid, or `<uid>:<n>` for the 2nd tile on. */
 export const LOUNGE_SEAT_RE = /^aero-[0-9a-f]{8}-lounge-\d+(?::\d+)?$/;
 
@@ -37,6 +42,7 @@ export interface Lounge {
   clock: LoungeItem | null;
 }
 
+export const isMeetingItemUid = (uid: string): boolean => MEETING_ITEM_RE.test(uid);
 export const isLoungeItemUid = (uid: string): boolean => LOUNGE_ITEM_RE.test(uid);
 export const isLoungeSeatUid = (uid: string): boolean => LOUNGE_SEAT_RE.test(uid);
 
@@ -111,8 +117,16 @@ export function findLounge(
       for (let c = item.col; c < item.col + item.w; c++) table.push({ col: c, row: r });
     }
   }
-  const whiteboard = mine.find((item) => item.type === 'WHITEBOARD') ?? null;
-  const clock = mine.find((item) => item.type === 'CLOCK') ?? null;
+  // The Big office keeps them in the Meeting Room; the Rooms style keeps them in the Lounge, which wins.
+  const meeting = items.filter((item) => isMeetingItemUid(item.uid));
+  const whiteboard =
+    mine.find((item) => item.type === 'WHITEBOARD') ??
+    meeting.find((item) => item.type === 'WHITEBOARD') ??
+    null;
+  const clock =
+    mine.find((item) => item.type === 'CLOCK') ??
+    meeting.find((item) => item.type === 'CLOCK') ??
+    null;
   return { floor, seats: loungeSeats, table, whiteboard, clock };
 }
 
