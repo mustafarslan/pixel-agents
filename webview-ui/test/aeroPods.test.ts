@@ -718,6 +718,8 @@ test('the area labels leave out the hidden ones and draw the others', () => {
 
 test('a lead restored before the pods are in force takes its pod bench when they come', () => {
   for (let i = 0; i < 20; i++) {
+    // `latest` is module-wide: each round starts with no update, as a freshly loaded page does.
+    resetAeroUpdate();
     const os = build();
     // The server's mappings are in force first, and the restored seat is one the layout doesn't have.
     os.setAreaMappings({ lead: ['Pod 1'] });
@@ -735,7 +737,7 @@ test('a lead restored before the pods are in force takes its pod bench when they
   }
 });
 
-test('the bench upgrade leaves a lead whose bench is taken, or that is outside its area, where it is', () => {
+test('the bench upgrade leaves a lead whose bench is taken where it is, and a lead outside its area goes to the free seat the mappings pick, not the bench', () => {
   const os = build();
   os.setAreaMappings({ a: ['Pod 1'], b: ['Pod 1'] });
   os.addAgent(1, 0, 0, 'p1-bench', true, 'a');
@@ -745,4 +747,6 @@ test('the bench upgrade leaves a lead whose bench is taken, or that is outside i
   os.update(0.1);
   assert.equal(os.characters.get(1)!.seatId, 'p1-bench');
   assert.equal(os.characters.get(2)!.seatId, 'p1-wood-a', "the bench is the other lead's");
+  // Lead 3 sat in Pod 2 with Pod 1 as its area: the mappings reseat it to Pod 1's one free seat; the bench is not taken from lead 1.
+  assert.equal(os.characters.get(3)!.seatId, 'p1-wood-b');
 });
