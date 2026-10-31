@@ -47,12 +47,16 @@ export function getAeroUpdate(): AeroUpdate | null {
   return latest;
 }
 
-/**
- * Whether the server's own area mappings (`areaMappingsLoaded`) may replace the page's: not while an accepted update carries
- * live pod mappings.
- */
-export function serverMappingsAllowed(): boolean {
-  return !latest?.pods;
+const labelSets = new WeakMap<AeroPods, ReadonlySet<string>>();
+
+/** The label keys of `pods`, built once per pods object (an update makes a new one). */
+export function podLabelSet(pods: AeroPods): ReadonlySet<string> {
+  let set = labelSets.get(pods);
+  if (!set) {
+    set = new Set(Object.keys(pods.labels));
+    labelSets.set(pods, set);
+  }
+  return set;
 }
 
 /** @internal for tests */
@@ -499,14 +503,19 @@ export class AeroOffice {
   // ── Configured characters ───────────────────────────────────────
 
   /**
-   * Hands an accepted update's pod mappings to the office once per new update, which reseats leads live. An update without
-   * pods leaves the mappings as they are (the stock server's own).
+   * Puts the mappings in force once per change of the pods: an accepted update with new pods hands them to the office (which
+   * reseats leads live), and one without pods after pods gives the server's mappings back. Without Aero's pods nothing here runs.
    */
   syncMappings(): void {
-    const pods = getAeroUpdate()?.pods;
-    if (!pods || pods === this.podsApplied) return;
+    const pods = getAeroUpdate()?.pods ?? null;
+    if (pods === this.podsApplied) return;
     this.podsApplied = pods;
-    this.os.setAreaMappings(pods.mappings);
+    this.os.refreshMappings();
+  }
+
+  /** Whether an accepted update's live pods are in force (the seat rules for the open office run only then). */
+  podsInForce(): boolean {
+    return getAeroUpdate()?.pods !== undefined;
   }
 
   /** Once a tick, after every character stepped. */
@@ -767,10 +776,10 @@ export class AeroOffice {
     return getAeroUpdate()?.pods ?? null;
   }
 
-  /** The area labels whose text the pods draw, so the stock area labels leave them out. */
+  /** The area labels whose text the pods draw, so the stock area labels leave them out. Cached per pods object. */
   podLabelKeys(): ReadonlySet<string> | undefined {
     const pods = getAeroUpdate()?.pods;
-    return pods ? new Set(Object.keys(pods.labels)) : undefined;
+    return pods ? podLabelSet(pods) : undefined;
   }
 
   /** The last accepted update. */

@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { HooksConsentRequest } from '../../../core/src/messages.js';
 import { withAeroFurniture } from '../aero/furniture.js';
-import { serverMappingsAllowed } from '../aero/office.js';
 import { playDoneSound, playPermissionSound, setSoundEnabled } from '../notificationSound.js';
 import type { ExistingAgentMeta, PendingAgent } from '../office/engine/existingAgents.js';
 import { reconcileExistingAgents } from '../office/engine/existingAgents.js';
@@ -728,13 +727,11 @@ export function useExtensionMessages(
         console.log(`[Webview] Received ${sets.length} carpet variant(s)`);
         setCarpetSprites(sets);
       } else if (msg.type === 'areaMappingsLoaded') {
-        // Aero: while an accepted update carries live pod mappings, the page uses those; the server's (the config file, as of
-        // the last layout Aero sent) must not overwrite them.
-        if (serverMappingsAllowed()) {
-          const mappings = (msg.mappings ?? {}) as Record<string, string[]>;
-          setAreaMappings(mappings);
-          os.setAreaMappings(mappings);
-        }
+        // Aero: the office keeps these as the server's mappings; while an accepted update carries live pod mappings those are in
+        // force instead, and these come back if an update has none again (OfficeState.setAreaMappings).
+        const mappings = (msg.mappings ?? {}) as Record<string, string[]>;
+        setAreaMappings(mappings);
+        os.setAreaMappings(mappings);
       } else if (msg.type === 'directoriesLoaded') {
         const directories = msg.directories as Directory[];
         setDirectories(directories);

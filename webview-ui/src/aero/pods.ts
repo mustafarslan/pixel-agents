@@ -16,6 +16,7 @@ import {
 } from '../constants.js';
 import type { OfficeState } from '../office/engine/officeState.js';
 import { TILE_SIZE } from '../office/types.js';
+import { podLabelSet } from './office.js';
 
 /** The part of a canvas 2D context the pods use. */
 export interface PodContext {
@@ -34,6 +35,21 @@ interface PodRegion {
   /** The centroid, in tiles. */
   cx: number;
   cy: number;
+}
+
+const colorCache = new WeakMap<object, Map<string, string>>();
+
+/** Area label to colour, built once per `areas` array (a rebuilt layout has a new one). */
+function areaColors(
+  areas: ReadonlyArray<{ label: string; color: string }> | undefined,
+): Map<string, string> {
+  if (!areas) return new Map();
+  let colors = colorCache.get(areas);
+  if (!colors) {
+    colors = new Map(areas.map((a) => [a.label, a.color]));
+    colorCache.set(areas, colors);
+  }
+  return colors;
 }
 
 const regionCache = new WeakMap<object, Map<string, PodRegion>>();
@@ -89,11 +105,10 @@ export function drawPods(
   const pods = os.aero.currentPods();
   if (!pods) return;
   const layout = os.getLayout();
-  const regions = podRegions(layout.areaTiles, layout.cols, new Set(Object.keys(pods.labels)));
+  const regions = podRegions(layout.areaTiles, layout.cols, podLabelSet(pods));
   if (regions.size === 0) return;
   const s = TILE_SIZE * zoom;
-  const colors = new Map<string, string>();
-  for (const a of layout.areas ?? []) colors.set(a.label, a.color);
+  const colors = areaColors(layout.areas);
 
   ctx.globalAlpha = AERO_POD_DIM_ALPHA;
   ctx.fillStyle = AERO_POD_DIM_COLOR;

@@ -1,12 +1,6 @@
 import type { ColorValue } from '../../components/ui/types.js';
 import {
   AREA_ACTIVE_ALPHA_MULTIPLIER,
-  AREA_LABEL_ALPHA,
-  AREA_LABEL_FALLBACK_COLOR,
-  AREA_LABEL_FONT_SIZE_PX,
-  AREA_LABEL_MIN_FONT_SIZE_PX,
-  AREA_LABEL_SHADOW_ALPHA,
-  AREA_LABEL_SHADOW_COLOR,
   AREA_OVERLAY_ALPHA,
   BUBBLE_FADE_DURATION_SEC,
   BUTTON_ICON_COLOR,
@@ -64,6 +58,7 @@ import type {
 } from '../types.js';
 import { CharacterState, TILE_SIZE, TileType } from '../types.js';
 import { getWallInstances, hasWallSprites, wallColorToHex } from '../wallTiles.js';
+import { drawAreaLabels } from './areaLabels.js';
 import { getCharacterSprite } from './characters.js';
 import { renderMatrixEffect } from './matrixEffect.js';
 import { getPetSpriteData } from './petEntity.js';
@@ -222,9 +217,8 @@ export function renderAreaOverlay(
 }
 
 /**
- * Render the centroid label for each Area, ABOVE characters/bubbles. Centroid
- * = arithmetic mean of all tile centers belonging to a given label. Pixel-art
- * drop shadow (no blur) for legibility on light backgrounds.
+ * Render the centroid label for each Area, ABOVE characters/bubbles (see `drawAreaLabels`, which holds the drawing so a test can
+ * run it with a recording context). `hiddenLabels` (Aero) are left out: it draws those itself.
  *
  * @internal
  */
@@ -239,55 +233,7 @@ export function renderAreaLabels(
   zoom: number,
   hiddenLabels?: ReadonlySet<string>,
 ): void {
-  if (!areaTiles || areaTiles.length === 0) return;
-  if (!areas || areas.length === 0) return;
-
-  const s = TILE_SIZE * zoom;
-  const colorMap = new Map<string, string>();
-  for (const a of areas) colorMap.set(a.label, a.color);
-
-  // Centroid accumulator: label → { sumX, sumY, count }.
-  const centroids = new Map<string, { sumX: number; sumY: number; count: number }>();
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      const label = areaTiles[r * cols + c];
-      if (!label) continue;
-      if (hiddenLabels?.has(label)) continue; // Aero draws these itself (live pod names)
-      const acc = centroids.get(label);
-      if (acc) {
-        acc.sumX += c;
-        acc.sumY += r;
-        acc.count += 1;
-      } else {
-        centroids.set(label, { sumX: c, sumY: r, count: 1 });
-      }
-    }
-  }
-
-  if (centroids.size === 0) return;
-
-  const fontSize = Math.max(AREA_LABEL_FONT_SIZE_PX * zoom, AREA_LABEL_MIN_FONT_SIZE_PX);
-
-  ctx.save();
-  ctx.font = `bold ${fontSize}px 'FS Pixel Sans'`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-
-  for (const [label, acc] of centroids) {
-    const cx = offsetX + (acc.sumX / acc.count + 0.5) * s;
-    const cy = offsetY + (acc.sumY / acc.count + 0.5) * s;
-
-    // Pixel-art drop shadow (1px right + down, no blur).
-    ctx.globalAlpha = AREA_LABEL_SHADOW_ALPHA;
-    ctx.fillStyle = AREA_LABEL_SHADOW_COLOR;
-    ctx.fillText(label, cx + 1, cy + 1);
-
-    // Main label — area's own color, falling back to white if missing.
-    ctx.globalAlpha = AREA_LABEL_ALPHA;
-    ctx.fillStyle = colorMap.get(label) ?? AREA_LABEL_FALLBACK_COLOR;
-    ctx.fillText(label, cx, cy);
-  }
-  ctx.restore();
+  drawAreaLabels(ctx, areaTiles, areas, cols, rows, offsetX, offsetY, zoom, hiddenLabels);
 }
 
 /** @internal */

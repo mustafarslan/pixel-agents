@@ -122,26 +122,25 @@ export class OfficeState {
   private greeterCameraCancelled = false;
 
   /**
-   * Takes new mappings and, for Aero's live pods, reseats: a lead seated outside its mapped area walks to a free seat inside
-   * it, when there is one (a full pod never causes reseating). A lead resting on an Aero route only has its seat swapped: it
-   * walks to the new one when it goes home.
+   * The server's mappings (and the page's own area UI's), kept as they come. While an accepted Aero update carries live pods, the
+   * pods' mappings are the ones in force instead (the server's can't change them); when an update has none again, these are back.
    */
+  private serverMappings: Record<string, string[]> = {};
+
   setAreaMappings(mappings: Record<string, string[]>): void {
-    this.areaMappings = mappings;
-    const electronicsTiles = this.buildElectronicsTileSet();
-    for (const ch of [...this.characters.values()]) {
-      if (ch.isSubagent || ch.leadAgentId !== undefined || ch.matrixEffect === 'despawn') continue;
-      const target = this.betterSeatInMappedArea(ch, electronicsTiles);
-      if (!target) continue;
-      if (this.aero.routes.has(ch.id)) {
-        const old = ch.seatId ? this.seats.get(ch.seatId) : undefined;
-        if (old) old.assigned = false;
-        this.seats.get(target)!.assigned = true;
-        ch.seatId = target;
-      } else {
-        this.reassignSeat(ch.id, target);
-      }
-    }
+    this.serverMappings = mappings;
+    this.refreshMappings();
+  }
+
+  /**
+   * Sets the mappings in force: Aero's pods when the last accepted update has them, else the server's. With pods, leads are
+   * reseated live: a lead seated outside its mapped area walks to a free seat inside it (a full pod never causes reseating), and
+   * its linked teammates follow into its new zone. Without pods this is the stock setter: nothing moves.
+   */
+  refreshMappings(): void {
+    const pods = this.aero.currentPods();
+    this.areaMappings = pods ? pods.mappings : this.serverMappings;
+    if (pods) this.reseatForMappings();
   }
 
   /** The area labels `directoryName` is mapped to, or null when it has none. */
@@ -154,36 +153,139 @@ export class OfficeState {
   }
 
   /**
+   * Aero: whether a seat in `zone` counts as inside the `wanted` areas. An unlabelled seat does when the areas include the Lounge
+   * (its seats carry no label, for the stock picker's second stage) or hold no labelled seat at all.
+   */
+  private zoneWanted(zone: string | null, wanted: Set<string>, unzonedWanted: boolean): boolean {
+    return zone === null ? unzonedWanted : wanted.has(zone);
+  }
+
+  private wantsUnzoned(wanted: Set<string>): boolean {
+    if (wanted.has('Lounge')) return true;
+    for (const uid of this.seats.keys()) {
+      const zone = this.seatZone(uid);
+      if (zone !== null && wanted.has(zone)) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Aero: the free seats inside the character's mapped areas, from `free` (seat uids), when its own seat `seatId` is outside them;
+   * null when it has no mapping or its seat is inside already.
+   */
+  private freeSeatsInMappedArea(
+    ch: Character,
+    seatId: string | null,
+    free: Iterable<string>,
+  ): string[] | null {
+    if (!this.aero.podsInForce()) return null;
+    const wanted = this.mappedAreas(ch.directoryName);
+    if (!wanted) return null;
+    const unzoned = this.wantsUnzoned(wanted);
+    if (this.zoneWanted(seatId ? this.seatZone(seatId) : null, wanted, unzoned)) return null;
+    const out: string[] = [];
+    for (const uid of free) if (this.zoneWanted(this.seatZone(uid), wanted, unzoned)) out.push(uid);
+    return out;
+  }
+
+  /**
    * Aero: a free seat inside the character's mapped area when its own seat is outside that area, else null. A character with
-   * no mapping, a seat already inside, or no free seat inside (a full pod) keeps what it has.
+   * no mapping, a seat already inside, or no free seat inside (a full pod) keeps what it has. Only while Aero's pods are in force.
    */
   private betterSeatInMappedArea(
     ch: Character,
     electronicsTiles: Set<string>,
     seatId: string | null = ch.seatId,
   ): string | null {
-    const wanted = this.mappedAreas(ch.directoryName);
-    if (!wanted) return null;
-    const zone = seatId ? this.seatZone(seatId) : null;
-    if (zone !== null && wanted.has(zone)) return null;
     const free: string[] = [];
-    for (const [uid, seat] of this.seats) {
-      if (seat.assigned) continue;
-      const label = this.seatZone(uid);
-      if (label !== null && wanted.has(label)) free.push(uid);
+    for (const [uid, seat] of this.seats) if (!seat.assigned) free.push(uid);
+    const inArea = this.freeSeatsInMappedArea(ch, seatId, free);
+    return inArea ? this.pickFromSeats(inArea, electronicsTiles, true) : null;
+  }
+
+  /**
+   * Aero: where each of `chars` that sits outside its mapped area would go. The seats of all that can move are free to every one
+   * of them (so the order of `chars` doesn't matter: a shift Pod 3 to 2 to 1 works whichever lead comes first); one that finds no
+   * seat inside its area stays where it is, and its seat is no longer free to the rest. Nothing is changed.
+   */
+  private planReseats(chars: Character[]): Map<Character, string> {
+    const electronicsTiles = this.buildElectronicsTileSet();
+    const stay = new Set<Character>();
+    for (;;) {
+      const free = new Set<string>();
+      for (const [uid, seat] of this.seats) if (!seat.assigned) free.add(uid);
+      const movers = chars.filter((ch) => {
+        if (stay.has(ch) || !ch.seatId) return false;
+        return this.freeSeatsInMappedArea(ch, ch.seatId, []) !== null;
+      });
+      for (const ch of movers) if (ch.seatId) free.add(ch.seatId);
+      const plan = new Map<Character, string>();
+      let changed = false;
+      for (const ch of movers) {
+        const inArea = this.freeSeatsInMappedArea(ch, ch.seatId, free);
+        const pick = inArea ? this.pickFromSeats(inArea, electronicsTiles, true) : null;
+        if (!pick) {
+          stay.add(ch);
+          changed = true;
+          continue;
+        }
+        free.delete(pick);
+        plan.set(ch, pick);
+      }
+      if (!changed) return plan;
     }
-    return this.pickFromSeats(free, electronicsTiles, true);
+  }
+
+  /** Aero: the characters whose seat is theirs to move by mapping: leads, not subagents, teammates or the despawning. */
+  private reseatableLeads(): Character[] {
+    return [...this.characters.values()].filter(
+      (ch) => !ch.isSubagent && ch.leadAgentId === undefined && ch.matrixEffect !== 'despawn',
+    );
+  }
+
+  /**
+   * Aero: reseats leads by the mappings in force (see `refreshMappings`), then moves each moved lead's linked teammates into its
+   * new zone, to the free seat closest to the lead. A lead resting on an Aero route only has its seat swapped: it walks to the new
+   * one when it goes home.
+   */
+  private reseatForMappings(): void {
+    const plan = this.planReseats(this.reseatableLeads());
+    if (plan.size === 0) return;
+    for (const ch of plan.keys()) {
+      const old = ch.seatId ? this.seats.get(ch.seatId) : undefined;
+      if (old) old.assigned = false;
+    }
+    for (const [ch, target] of plan) {
+      if (this.aero.routes.has(ch.id)) {
+        this.seats.get(target)!.assigned = true;
+        ch.seatId = target;
+      } else {
+        ch.seatId = null; // its old seat is free or already another lead's: reassignSeat must not touch it
+        this.reassignSeat(ch.id, target);
+      }
+    }
+    for (const lead of plan.keys()) {
+      const anchor = anchorTile(lead, this.seats);
+      if (!anchor) continue;
+      for (const mate of [...this.characters.values()]) {
+        if (mate.leadAgentId !== lead.id || mate.matrixEffect === 'despawn') continue;
+        const { seatId, zone } = this.closestFreeSeatInZone(anchor, lead.seatId);
+        if (!seatId || zone === null) continue;
+        if ((mate.seatId ? this.seatZone(mate.seatId) : null) === zone) continue;
+        this.reassignSeat(mate.id, seatId);
+      }
+    }
   }
 
   /**
    * Aero: the free seat closest to a lead's seat, inside the lead's seat zone while that zone has one; only when it has none,
-   * the old behaviour (closest anywhere). Returns the zone it limited to, or null when it didn't.
+   * the old behaviour (closest anywhere). Returns the zone it limited to, or null when it didn't. Stock without Aero's pods.
    */
   private closestFreeSeatInZone(
     anchor: { col: number; row: number },
     leadSeatId: string | null | undefined,
   ): { seatId: string | null; zone: string | null } {
-    const zone = leadSeatId ? this.seatZone(leadSeatId) : null;
+    const zone = leadSeatId && this.aero.podsInForce() ? this.seatZone(leadSeatId) : null;
     if (zone !== null) {
       const inZone = closestFreeSeat(
         this.seats,
@@ -210,6 +312,7 @@ export class OfficeState {
   /** Rebuild all derived state from a new layout. Reassigns existing characters.
    *  @param shift Optional pixel shift to apply when grid expands left/up */
   rebuildFromLayout(layout: OfficeLayout, shift?: { col: number; row: number }): void {
+    this.aero.syncMappings();
     this.layout = layout;
     this.tileMap = layoutToTileMap(layout);
     this.seats = layoutToSeats(layout.furniture);
@@ -267,14 +370,18 @@ export class OfficeState {
       ch.seatId = null; // will be reassigned below
     }
 
-    // Aero: a kept seat outside the character's mapped area is dropped, only when a free seat inside the area exists.
-    const keptElectronics = this.buildElectronicsTileSet();
-    for (const ch of this.characters.values()) {
-      if (!ch.seatId || ch.isSubagent || ch.leadAgentId !== undefined) continue;
-      const better = this.betterSeatInMappedArea(ch, keptElectronics);
-      if (!better) continue;
-      this.seats.get(ch.seatId)!.assigned = false;
-      ch.seatId = null; // seated again in the pass below
+    // Aero: a kept seat outside the character's mapped area is given up for a free seat inside it, only when one exists, and each
+    // free seat goes to one character (the plan takes the seats of all that move as free, whichever comes first).
+    for (const [ch, target] of this.planReseats(this.reseatableLeads())) {
+      this.seats.get(ch.seatId!)!.assigned = false;
+      const seat = this.seats.get(target)!;
+      seat.assigned = true;
+      ch.seatId = target;
+      ch.tileCol = seat.seatCol;
+      ch.tileRow = seat.seatRow;
+      ch.x = seat.seatCol * TILE_SIZE + TILE_SIZE / 2;
+      ch.y = seat.seatRow * TILE_SIZE + TILE_SIZE / 2;
+      ch.dir = seat.facingDir;
     }
 
     // Second pass: assign remaining characters to free seats
@@ -443,7 +550,7 @@ export class OfficeState {
         otherSeats.push(uid);
       }
     }
-    if (preferBench && pcSeats.length > 0) {
+    if (preferBench && pcSeats.length > 0 && this.aero.podsInForce()) {
       // Aero: a pod's lead takes the cushioned bench at the PC; the wooden benches stay for its subagents.
       const types = new Map<string, string>();
       for (const item of this.layout.furniture) types.set(item.uid, item.type);
@@ -470,15 +577,14 @@ export class OfficeState {
    * unzoned seats from a layout without `areaTiles`, which is every seat).
    */
   private findFreeSeat(directoryName?: string): string | null {
+    // Aero's live pods may have changed the mappings (and moved leads) since the last tick: before the free seats are listed.
+    this.aero.syncMappings();
     const electronicsTiles = this.buildElectronicsTileSet();
     const freeSeats: string[] = [];
     for (const [uid, seat] of this.seats) {
       if (!seat.assigned) freeSeats.push(uid);
     }
     if (freeSeats.length === 0) return null;
-
-    // Aero's live pods may have changed the mappings since the last tick.
-    this.aero.syncMappings();
     const areaLabels = directoryName ? this.areaMappings[directoryName] : undefined;
 
     // Stage 1 — in-area seats for the Directory's mapped Area labels.
