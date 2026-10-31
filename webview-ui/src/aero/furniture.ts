@@ -3,10 +3,14 @@
  * games console, and an arcade cabinet. The stock server (1.5.0) sends its own furniture and knows none of them, so
  * they live in the page and are merged into the catalog at the one place the page receives it (`furnitureAssetsLoaded`).
  *
+ * None is `electronics`: the stock seat picker treats that category as a PC and prefers a seat facing one, so agents would
+ * type on the games sofa. None is `chairs` or `desks` for the same kind of reason.
+ *
  * Sizes follow the renderer, which draws a sprite from its row downward: a 16x32 piece is 1x2 tiles with the top tile
  * a background tile (walkable behind it), as PLANT is. Every id starts `AERO_`; an incoming entry with the same id wins.
  */
 
+import type { FurnitureCategory } from '../office/layout/furnitureCatalog.js';
 import { buildAeroSprites } from '../office/sprites/aeroFurniture.js';
 import type { SpriteData } from '../office/types.js';
 
@@ -15,7 +19,7 @@ export interface AeroCatalogAsset {
   id: string;
   name: string;
   label: string;
-  category: string;
+  category: FurnitureCategory;
   file: string;
   width: number;
   height: number;
@@ -31,7 +35,7 @@ export interface AeroCatalogAsset {
 function piece(
   id: string,
   label: string,
-  category: string,
+  category: FurnitureCategory,
   width: number,
   height: number,
   footprintW: number,
@@ -63,8 +67,8 @@ export function aeroFurnitureCatalog(): AeroCatalogAsset[] {
     piece('AERO_SINK', 'Sink', 'misc', 16, 32, 1, 2, 1),
     piece('AERO_FRIDGE', 'Fridge', 'storage', 16, 32, 1, 2, 1),
     piece('AERO_PINGPONG', 'Ping-pong table', 'misc', 32, 32, 2, 2, 0),
-    piece('AERO_CONSOLE', 'TV and console', 'electronics', 32, 32, 2, 2, 1),
-    piece('AERO_ARCADE', 'Arcade cabinet', 'electronics', 16, 32, 1, 2, 1),
+    piece('AERO_CONSOLE', 'TV and console', 'decor', 32, 32, 2, 2, 1),
+    piece('AERO_ARCADE', 'Arcade cabinet', 'decor', 16, 32, 1, 2, 1),
   ];
 }
 
@@ -81,7 +85,12 @@ export function withAeroFurniture<C extends { id: string }>(
     (entry) => entry !== null && typeof entry === 'object' && typeof entry.id === 'string',
   );
   const incomingSprites: Record<string, SpriteData> =
-    sprites !== null && typeof sprites === 'object' ? sprites : {};
+    sprites !== null && typeof sprites === 'object' && !Array.isArray(sprites) ? sprites : {};
+  // A catalog with no entry the page can build (none has a sprite) is not a catalog: it is returned as it is, so the page's
+  // build fails and keeps the previous catalog instead of replacing it with Aero's six alone.
+  if (!incoming.some((entry) => Array.isArray(incomingSprites[entry.id]))) {
+    return { catalog: incoming, sprites: incomingSprites };
+  }
   const taken = new Set<string>(incoming.map((entry) => entry.id));
   const mergedCatalog: Array<C | AeroCatalogAsset> = [...incoming];
   const mergedSprites: Record<string, SpriteData> = { ...incomingSprites };
