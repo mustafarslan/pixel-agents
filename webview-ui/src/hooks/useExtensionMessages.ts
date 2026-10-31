@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { HooksConsentRequest } from '../../../core/src/messages.js';
+import { withAeroFurniture } from '../aero/furniture.js';
 import { playDoneSound, playPermissionSound, setSoundEnabled } from '../notificationSound.js';
 import type { ExistingAgentMeta, PendingAgent } from '../office/engine/existingAgents.js';
 import { reconcileExistingAgents } from '../office/engine/existingAgents.js';
@@ -824,8 +825,11 @@ export function useExtensionMessages(
         }
       } else if (msg.type === 'furnitureAssetsLoaded') {
         try {
-          const catalog = msg.catalog as FurnitureAsset[];
-          const sprites = msg.sprites as Record<string, string[][]>;
+          // Aero adds its six pieces to what the server sent; one merged object goes to both, as the editor rebuilds from loadedAssets
+          const { catalog, sprites } = withAeroFurniture(
+            msg.catalog as FurnitureAsset[],
+            msg.sprites as Record<string, string[][]>,
+          );
           console.log(`📦 Webview: Loaded ${catalog.length} furniture assets`);
           // Build dynamic catalog immediately so getCatalogEntry() works when layoutLoaded arrives next
           buildDynamicCatalog({ catalog, sprites });

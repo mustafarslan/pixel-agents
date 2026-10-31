@@ -2,6 +2,7 @@ import type { AeroSnapshot } from './aero/office.js';
 import type { ColorValue } from './components/ui/types.js';
 import { OfficeState } from './office/engine/officeState.js';
 import { isGhostHeadlessAgentsEnabled } from './office/engine/renderer.js';
+import { getCatalogEntry } from './office/layout/furnitureCatalog.js';
 import { carpetJunctionCase } from './office/sprites/carpetTiles.js';
 
 declare global {
@@ -111,6 +112,17 @@ declare global {
         parentToolId?: string;
       }>;
       selectAgent?: (id: number) => void;
+      /** Read-only: each id's entry in the live furniture catalog (null when it isn't there): its footprint,
+       *  background rows, sprite size and the count of distinct colours drawn in the sprite. */
+      getCatalogEntries?: (ids: string[]) => Array<{
+        id: string;
+        footprintW: number;
+        footprintH: number;
+        backgroundTiles: number;
+        spriteWidth: number;
+        spriteHeight: number;
+        colors: number;
+      } | null>;
       /** Aero's routing state: the last accepted update, the Lounge, routes, configured characters, hidden subs, badges. */
       getAero?: () => AeroSnapshot | null;
     };
@@ -165,6 +177,23 @@ export function installTestHooks(officeStateRef: { current: OfficeState | null }
   hooks.getCameraFollowId = () => officeStateRef.current?.cameraFollowId ?? null;
 
   hooks.getAero = () => officeStateRef.current?.aero.snapshot() ?? null;
+
+  hooks.getCatalogEntries = (ids) =>
+    ids.map((id) => {
+      const entry = getCatalogEntry(id);
+      if (!entry) return null;
+      const colors = new Set<string>();
+      for (const row of entry.sprite) for (const px of row) if (px !== '') colors.add(px);
+      return {
+        id,
+        footprintW: entry.footprintW,
+        footprintH: entry.footprintH,
+        backgroundTiles: entry.backgroundTiles ?? 0,
+        spriteWidth: entry.sprite[0]?.length ?? 0,
+        spriteHeight: entry.sprite.length,
+        colors: colors.size,
+      };
+    });
 
   hooks.selectAgent = (id) => {
     const os = officeStateRef.current;
