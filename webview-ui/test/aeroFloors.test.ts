@@ -364,7 +364,21 @@ test('a hidden character does not move, route or count as occupying a tile', () 
   const occupied = (os.aero as unknown as { occupied(except: number): Set<string> }).occupied(
     Number.NaN,
   );
-  assert.equal(occupied.has(`${hidden.tileCol},${hidden.tileRow}`), false);
+  // The hidden one stands where it was parked, which can be the seat tile the floor's lead then picked at random: put it on a tile
+  // nobody else has, so that it counting would show.
+  hidden.tileCol = 15;
+  hidden.tileRow = 6;
+  const visible = ch(os, 2);
+  const after = (os.aero as unknown as { occupied(except: number): Set<string> }).occupied(
+    Number.NaN,
+  );
+  assert.equal(after.has('15,6'), false, 'the hidden character takes no tile');
+  assert.deepEqual(
+    [...after],
+    [`${visible.tileCol},${visible.tileRow}`],
+    'only the lead on the floor does',
+  );
+  assert.equal(occupied.has('15,6'), false);
 });
 
 test('a hidden character is dropped from the selection, the hover and the camera follow', () => {
@@ -517,4 +531,26 @@ test('the PR runs are on every floor even when the update does not list them', (
   os.update(0.1);
   assert.equal(shown(os, 1), true);
   assert.equal(os.aero.roomOnFloor('prruns'), true);
+});
+
+test('a teammate linked while its floor is hidden sits next to its lead when the floor is back', () => {
+  const os = build();
+  os.addAgent(1, 0, 0, undefined, true, B);
+  os.addAgent(2, 0, 0, undefined, true, B);
+  onFloor('A');
+  os.update(0.1);
+  os.setTeamInfo(2, 'team', 'mate', false, 1, false);
+  os.update(0.1);
+  assert.equal(ch(os, 2).seatId, null, 'no seat while hidden');
+  assert.deepEqual(seated(os), []);
+  onFloor('B');
+  os.update(0.1);
+  const lead = ch(os, 1);
+  const mate = ch(os, 2);
+  assert.ok(lead.seatId && mate.seatId && lead.seatId !== mate.seatId);
+  assert.equal(os.seatZone(mate.seatId!), os.seatZone(lead.seatId!), "in its lead's zone");
+  const a = os.seats.get(lead.seatId!)!;
+  const b = os.seats.get(mate.seatId!)!;
+  assert.ok(Math.abs(a.seatCol - b.seatCol) + Math.abs(a.seatRow - b.seatRow) <= 2, 'next to it');
+  assert.equal(new Set(seated(os)).size, 2);
 });
