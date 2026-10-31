@@ -31,6 +31,8 @@ export interface AeroCatalogAsset {
   canPlaceOnSurfaces?: boolean;
   backgroundTiles?: number;
   orientation?: string;
+  groupId?: string;
+  rotationScheme?: string;
 }
 
 function piece(
@@ -43,6 +45,7 @@ function piece(
   footprintH: number,
   backgroundTiles: number,
   canPlaceOnSurfaces = false,
+  rotation?: { groupId: string; orientation: string },
 ): AeroCatalogAsset {
   return {
     id,
@@ -58,7 +61,8 @@ function piece(
     canPlaceOnWalls: false,
     canPlaceOnSurfaces,
     backgroundTiles,
-    orientation: 'front',
+    orientation: rotation?.orientation ?? 'front',
+    ...(rotation ? { groupId: rotation.groupId, rotationScheme: '2-way' } : {}),
   };
 }
 
@@ -80,8 +84,16 @@ export function aeroFurnitureCatalog(): AeroCatalogAsset[] {
     piece('AERO_VENDING_MACHINE', 'Vending machine', 'misc', 16, 32, 1, 2, 1),
     piece('AERO_SECURITY_DESK', 'Security desk', 'misc', 32, 32, 2, 2, 1),
     piece('AERO_TURNSTILE', 'Turnstile', 'misc', 16, 32, 1, 2, 1),
-    piece('AERO_BALCONY_RAILING', 'Balcony railing', 'decor', 16, 16, 1, 1, 0),
-    piece('AERO_BALCONY_RAILING_SIDE', 'Balcony railing (side)', 'decor', 16, 16, 1, 1, 0),
+    // The two railings are one 2-way rotation group, as the stock desk is: the editor shows the front one, and rotating it
+    // gives the side one (for vertical runs).
+    piece('AERO_BALCONY_RAILING', 'Balcony railing', 'decor', 16, 16, 1, 1, 0, false, {
+      groupId: 'AERO_BALCONY_RAILING',
+      orientation: 'front',
+    }),
+    piece('AERO_BALCONY_RAILING_SIDE', 'Balcony railing (side)', 'decor', 16, 16, 1, 1, 0, false, {
+      groupId: 'AERO_BALCONY_RAILING',
+      orientation: 'side',
+    }),
     piece('AERO_ASHTRAY_STAND', 'Ashtray stand', 'misc', 16, 32, 1, 2, 1),
   ];
 }

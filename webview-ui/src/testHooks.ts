@@ -2,7 +2,7 @@ import type { AeroSnapshot } from './aero/office.js';
 import type { ColorValue } from './components/ui/types.js';
 import { OfficeState } from './office/engine/officeState.js';
 import { isGhostHeadlessAgentsEnabled } from './office/engine/renderer.js';
-import { getCatalogEntry } from './office/layout/furnitureCatalog.js';
+import { getCatalogByCategory, getCatalogEntry } from './office/layout/furnitureCatalog.js';
 import { carpetJunctionCase } from './office/sprites/carpetTiles.js';
 
 declare global {
@@ -118,6 +118,12 @@ declare global {
         id: string;
         category: string;
         canPlaceOnSurfaces: boolean;
+        isDesk: boolean;
+        canPlaceOnWalls: boolean;
+        /** Every sprite row has the same width. */
+        uniformRows: boolean;
+        /** The id is in the editor palette for its category (a non-front member of a rotation group is not). */
+        inPalette: boolean;
         footprintW: number;
         footprintH: number;
         backgroundTiles: number;
@@ -190,6 +196,10 @@ export function installTestHooks(officeStateRef: { current: OfficeState | null }
         id,
         category: entry.category,
         canPlaceOnSurfaces: entry.canPlaceOnSurfaces === true,
+        isDesk: entry.isDesk === true,
+        canPlaceOnWalls: entry.canPlaceOnWalls === true,
+        uniformRows: entry.sprite.every((row) => row.length === (entry.sprite[0]?.length ?? 0)),
+        inPalette: getCatalogByCategory(entry.category).some((e) => e.type === id),
         footprintW: entry.footprintW,
         footprintH: entry.footprintH,
         backgroundTiles: entry.backgroundTiles ?? 0,

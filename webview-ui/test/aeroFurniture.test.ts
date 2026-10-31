@@ -18,7 +18,10 @@ import { OfficeState } from '../src/office/engine/officeState.js';
 import {
   buildDynamicCatalog,
   FURNITURE_CATEGORIES,
+  getCatalogByCategory,
   getCatalogEntry,
+  getRotatedType,
+  isRotatable,
 } from '../src/office/layout/furnitureCatalog.js';
 import {
   getBlockedTiles,
@@ -233,7 +236,7 @@ test('the entries carry the plan sizes, a category that is never chairs, and no 
     // Only the flower pot goes on a desk.
     assert.equal(e.canPlaceOnSurfaces, e.id === 'AERO_FLOWER_POT', `${e.id} surface flag`);
     assert.equal(e.file, '');
-    assert.equal(e.orientation, 'front');
+    assert.equal(e.orientation, e.id === 'AERO_BALCONY_RAILING_SIDE' ? 'side' : 'front', e.id);
   }
 });
 
@@ -412,4 +415,45 @@ test('the flower pot sits on a desk front row: accepted, in front of the desk, a
     [...getBlockedTiles(withPot)].sort(),
     [...getBlockedTiles(layout.furniture)].sort(),
   );
+});
+
+test('the two railings are one rotation group: the palette shows it once, rotating gives the other, both resolve', () => {
+  const m = withAeroFurniture(stockCatalog(), stockSprites());
+  assert.ok(buildDynamicCatalog({ catalog: m.catalog, sprites: m.sprites }));
+  const front = 'AERO_BALCONY_RAILING';
+  const side = 'AERO_BALCONY_RAILING_SIDE';
+  assert.equal(isRotatable(front), true);
+  assert.equal(isRotatable(side), true);
+  assert.equal(getRotatedType(front, 'cw'), side);
+  assert.equal(getRotatedType(side, 'cw'), front);
+  assert.equal(getRotatedType(front, 'ccw'), side);
+  // Both ids still resolve for a layout that names them; only the front one is in the palette.
+  assert.ok(getCatalogEntry(front));
+  assert.ok(getCatalogEntry(side));
+  const palette = getCatalogByCategory('decor').filter((e) => e.type.startsWith('AERO_BALCONY'));
+  assert.deepEqual(
+    palette.map((e) => e.type),
+    [front],
+  );
+  // Nothing else of Aero's is a rotation group.
+  for (const id of IDS.filter((i) => !i.startsWith('AERO_BALCONY'))) {
+    assert.equal(isRotatable(id), false, id);
+  }
+});
+
+test('the hook fields the self-test reads: desk and wall flags, uniform rows, palette presence', () => {
+  const m = withAeroFurniture(stockCatalog(), stockSprites());
+  assert.ok(buildDynamicCatalog({ catalog: m.catalog, sprites: m.sprites }));
+  for (const id of IDS) {
+    const entry = getCatalogEntry(id);
+    assert.ok(entry, id);
+    assert.equal(entry.isDesk, false, id);
+    assert.equal(entry.canPlaceOnWalls ?? false, false, id);
+    assert.ok(
+      entry.sprite.every((row) => row.length === entry.sprite[0]?.length),
+      `${id} uniform rows`,
+    );
+    const inPalette = getCatalogByCategory(entry.category).some((e) => e.type === id);
+    assert.equal(inPalette, id !== 'AERO_BALCONY_RAILING_SIDE', `${id} palette`);
+  }
 });
