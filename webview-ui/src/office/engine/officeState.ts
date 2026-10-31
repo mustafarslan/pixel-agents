@@ -660,6 +660,7 @@ export class OfficeState {
   private closestFreeWalkableTile(col: number, row: number): { col: number; row: number } | null {
     const occupied = new Set<string>();
     for (const ch of this.characters.values()) {
+      if (this.aero.isOffFloor(ch.id)) continue;
       occupied.add(`${ch.tileCol},${ch.tileRow}`);
     }
     let best: { col: number; row: number } | null = null;
@@ -921,6 +922,8 @@ export class OfficeState {
     const teammate = this.characters.get(teammateId);
     const lead = this.characters.get(leadId);
     if (!teammate || !lead) return;
+    // Aero: a teammate of another floor holds no seat; it is seated by its lead's when the floor is back.
+    if (!this.aero.isOnFloor(teammate)) return;
     const anchorAt = anchorTile(lead, this.seats);
     if (!anchorAt) return;
     const { seatId: target, zone } = this.closestFreeSeatInZone(anchorAt, lead.seatId);
@@ -1436,8 +1439,12 @@ export class OfficeState {
     this.aero.afterTick(dt);
 
     // ── Pet FSM ────────────────────────────────────────────────
+    // Pets look for someone to follow among the characters on this floor only.
+    const shownCharacters = this.aero.hasOffFloor()
+      ? new Map([...this.characters].filter(([id]) => !this.aero.isOffFloor(id)))
+      : this.characters;
     for (const pet of this.pets) {
-      updatePet(pet, dt, this.walkableTiles, this.characters, this.tileMap, this.blockedTiles);
+      updatePet(pet, dt, this.walkableTiles, shownCharacters, this.tileMap, this.blockedTiles);
 
       // Tick heart bubble timer (mirrors character waiting-bubble pattern)
       if (pet.bubbleType) {

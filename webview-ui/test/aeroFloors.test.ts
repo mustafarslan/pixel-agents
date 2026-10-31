@@ -503,3 +503,18 @@ test('no floor, no sign; and a layout other than the open office gets none', () 
   drawFloorSign(rooms, small, 0, 0, 2);
   assert.deepEqual(rooms.texts, []);
 });
+
+test('the PR runs are on every floor even when the update does not list them', () => {
+  const os = build();
+  os.addAgent(1, 0, 0, undefined, true, 'prruns');
+  assert.ok(
+    setAeroUpdate({
+      ...base(),
+      pods: { mappings: { [A]: ['Pod 1'], prruns: [BAY] }, labels: {} },
+      floor: { id: A, number: 1, name: 'aero', rooms: [A] },
+    }),
+  );
+  os.update(0.1);
+  assert.equal(shown(os, 1), true);
+  assert.equal(os.aero.roomOnFloor('prruns'), true);
+});

@@ -35,6 +35,7 @@ import {
   type AeroUpdate,
   agentTypeFromStatus,
   parseAeroUpdate,
+  PR_RUNS_ROOM,
 } from './update.js';
 
 // ── The last update ────────────────────────────────────────────────
@@ -555,6 +556,7 @@ export class AeroOffice {
       const arrivals = this.arrivals;
       this.arrivals = [];
       this.os.placeArrivals(arrivals);
+      for (const ch of arrivals) this.settleArrival(ch);
       if (parked || arrivals.length > 0) this.os.refreshFurniture();
     } finally {
       this.syncing = false;
@@ -571,6 +573,8 @@ export class AeroOffice {
     const floor = getAeroUpdate()?.floor;
     if (!floor) return true;
     if (room === null) return true;
+    // The PR runs share one stub folder and are on every floor, whether or not the update lists it.
+    if (room === PR_RUNS_ROOM) return true;
     return room !== undefined && floorRooms(floor).has(room);
   }
 
@@ -578,6 +582,10 @@ export class AeroOffice {
    * Whether `ch` is on the floor on show. A subagent and a teammate are where their lead is; a lead is on the floor of its
    * directory name, and one with no directory name is on none. Every character is on the floor when the update has none.
    */
+  isOnFloor(ch: Character): boolean {
+    return this.onFloor(ch);
+  }
+
   private onFloor(ch: Character): boolean {
     if (!getAeroUpdate()?.floor) return true;
     let lead = ch;
@@ -591,8 +599,36 @@ export class AeroOffice {
     return this.roomOnFloor(lead.directoryName ?? undefined);
   }
 
+  /**
+   * Whether a configured character is on the floor on show: while it stands in for a subagent it is where that subagent's lead is;
+   * otherwise by its room (the owner's agents, with none, are on every floor).
+   */
   private personOnFloor(person: Person): boolean {
+    if (person.subId !== null) {
+      const sub = this.os.characters.get(person.subId);
+      if (sub) return this.onFloor(sub);
+    }
     return this.roomOnFloor(person.room);
+  }
+
+  /**
+   * A lead that comes back to the floor idle goes straight to the place its route would take it to (the Lounge, or the table at
+   * lunch), not to its desk first and from there across the floor.
+   */
+  private settleArrival(ch: Character): void {
+    if (ch.isSubagent || ch.leadAgentId !== undefined || !ch.seatId || ch.isActive) return;
+    if (ch.bubbleType === 'permission' || ch.matrixEffect === 'despawn') return;
+    this.refresh();
+    const update = this.enabled();
+    if (!update || !this.lounge) return;
+    const mode: RouteMode = update.lunch && this.lounge.table.length > 0 ? 'lunch' : 'rest';
+    const route = this.assign(ch, mode);
+    if (route && !route.arrived) this.arrive(ch, route);
+  }
+
+  /** Whether any character is on another floor than the one on show. */
+  hasOffFloor(): boolean {
+    return this.offFloor.size > 0;
   }
 
   /** Whether the character is on another floor than the one on show. */
@@ -622,6 +658,10 @@ export class AeroOffice {
       if (off && !was) {
         this.offFloor.add(ch.id);
         this.dropRoute(ch.id);
+        os.releaseSeat(ch);
+        changed = true;
+      } else if (off && ch.seatId) {
+        // A hidden character holds no seat, however it came by one (a seat pick, a teammate link).
         os.releaseSeat(ch);
         changed = true;
       } else if (!off && was) {
@@ -806,7 +846,7 @@ export class AeroOffice {
     // Home again: a poof where the trip ends.
     if (person.returning && ch.state !== CharacterState.WALK) {
       person.returning = false;
-      this.poofAt(ch);
+      if (this.personOnFloor(person)) this.poofAt(ch);
     }
   }
 
@@ -834,7 +874,7 @@ export class AeroOffice {
     const type = agentTypeFromStatus(status);
     if (type === null) return false;
     const lead = this.os.characters.get(parentId);
-    if (!lead || this.offFloor.has(parentId) || !this.onFloor(lead)) return false;
+    if (!lead) return false;
     // A project agent only for a lead in its room (preferred); the owner's agents (no room) for any lead.
     // One that is still spawning matches too; one that is despawning does not. (Two subagents of one type at once: the second
     // stays stock while the character is away.)
@@ -851,7 +891,8 @@ export class AeroOffice {
     person.subId = subId;
     person.returning = false;
     const ch = person.ch;
-    this.poofAt(ch);
+    // A stand-in for a subagent of another floor is hidden with it: no poof.
+    if (this.personOnFloor(person)) this.poofAt(ch);
     ch.isActive = true;
     const taken = this.occupied(Number.NaN);
     // To the lead's seat (its desk), not to wherever the lead stands now: a lead resting in the Lounge is not where the work is.

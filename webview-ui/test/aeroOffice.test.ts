@@ -729,3 +729,105 @@ test('wall clicks resolve only with an update and a Lounge', () => {
   setAeroUpdate(update({ lounge: false }));
   assert.equal(os.aero.wallHitAt(6.5 * 16, 8), null);
 });
+
+// ── Floors (docs/work/phase6-floors/plan.md, the fix round) ─────────
+
+const FA = 'aaaaaaaaaaaa';
+const FB = 'bbbbbbbbbbbb';
+const onFloor = (which: string, over: Record<string, unknown> = {}) =>
+  update({
+    floor: { id: which, number: which === FA ? 1 : 2, name: 'f', rooms: [which] },
+    ...over,
+  });
+
+test('a lead that comes back to its floor idle goes straight to its Lounge place, never to its desk first', () => {
+  const os = build();
+  os.addAgent(1, 0, 0, DESK, true, FA);
+  assert.ok(setAeroUpdate(onFloor(FA)));
+  os.setAgentActive(1, false);
+  os.showWaitingBubble(1, false);
+  until(os, () => os.aero.routes.get(1)?.arrived === true, 60, 'rest on floor 1');
+  assert.ok(setAeroUpdate(onFloor(FB)));
+  os.update(0.1);
+  assert.equal(os.aero.hides(os.characters.get(1)!), true);
+  assert.ok(setAeroUpdate(onFloor(FA)));
+  os.update(0.1);
+  const route = os.aero.routes.get(1);
+  const ch = os.characters.get(1)!;
+  assert.equal(route?.arrived, true, 'at its place at once');
+  assert.notEqual(at(os, 1), `${DESK_TILE.col},${DESK_TILE.row}`, 'not teleported to the desk');
+  assert.notEqual(ch.state, CharacterState.WALK);
+  const target = os.seats.get(route!.seatUid!)!;
+  assert.equal(at(os, 1), `${target.seatCol},${target.seatRow}`);
+});
+
+test('a SubagentStart of a lead on another floor hides both the stock subagent and the stand-in; they show when the floor is back', () => {
+  const os = build();
+  os.addAgent(1, 0, 0, DESK, true, FB);
+  assert.ok(
+    setAeroUpdate(onFloor(FA, { agents: [{ name: 'Code Reviewer', slug: 'code-reviewer' }] })),
+  );
+  run(os, MATRIX_EFFECT_DURATION + 0.5);
+  const person = os.aero.people[0];
+  assert.equal(
+    os.aero.characters([]).includes(person.ch),
+    true,
+    'at home in the Lounge it is on the floor',
+  );
+  const subId = os.addSubagent(1, 'tool-1');
+  const sub = os.characters.get(subId)!;
+  assert.equal(
+    os.aero.subagentStarted(1, 'tool-1', 'Subtask: code-reviewer'),
+    true,
+    'it stands in even for a lead off the floor',
+  );
+  assert.equal(sub.aeroHidden, true);
+  const fx = os.aero.fx.started.poof ?? 0;
+  assert.equal(os.aero.characters([]).includes(person.ch), false, 'the stand-in is hidden with it');
+  assert.equal(os.aero.snapshot().people[0].away, true);
+  run(os, 1);
+  assert.equal(os.aero.characters([]).includes(person.ch), false);
+  assert.equal(os.aero.fx.started.poof ?? 0, fx, 'no poof for a character nobody sees');
+  assert.ok(
+    setAeroUpdate(onFloor(FB, { agents: [{ name: 'Code Reviewer', slug: 'code-reviewer' }] })),
+  );
+  os.update(0.1);
+  assert.equal(os.aero.characters([]).includes(person.ch), true);
+  assert.equal(os.getCharacters().includes(sub), false, 'the stock subagent stays hidden');
+});
+
+test('an off-floor character that holds a seat gives it up at the next sync, and a hidden teammate is not seated by a link', () => {
+  const os = build();
+  os.addAgent(1, 0, 0, DESK, true, FA);
+  assert.ok(setAeroUpdate(onFloor(FA)));
+  os.update(0.1);
+  // A teammate of floor B's lead, created hidden, is linked while its floor is off.
+  os.addAgent(2, 0, 0, undefined, true, FB);
+  assert.equal(os.characters.get(2)!.seatId, null);
+  os.setTeamInfo(2, 'team', 'mate', false, 3, false);
+  assert.equal(os.characters.get(2)!.seatId, null);
+  // A seat handed to a hidden character by any route is taken back.
+  os.seats.get(DESK)!.assigned = false;
+  os.characters.get(2)!.seatId = DESK;
+  os.seats.get(DESK)!.assigned = true;
+  os.characters.get(1)!.seatId = null;
+  os.update(0.1);
+  assert.equal(os.characters.get(2)!.seatId, null);
+  assert.equal(os.seats.get(DESK)!.assigned, false);
+});
+
+test('off-floor characters take no tile when a spawn is looked for', () => {
+  const os = build();
+  os.addAgent(1, 0, 0, undefined, true, FB);
+  assert.ok(setAeroUpdate(onFloor(FA)));
+  os.update(0.1);
+  const hidden = os.characters.get(1)!;
+  hidden.tileCol = 3;
+  hidden.tileRow = 3;
+  const tile = (
+    os as unknown as {
+      closestFreeWalkableTile(c: number, r: number): { col: number; row: number } | null;
+    }
+  ).closestFreeWalkableTile(hidden.tileCol, hidden.tileRow);
+  assert.deepEqual([tile?.col, tile?.row], [hidden.tileCol, hidden.tileRow]);
+});
