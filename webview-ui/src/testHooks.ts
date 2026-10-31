@@ -112,10 +112,12 @@ declare global {
         parentToolId?: string;
       }>;
       selectAgent?: (id: number) => void;
-      /** Read-only: each id's entry in the live furniture catalog (null when it isn't there): its footprint,
-       *  background rows, sprite size and the count of distinct colours drawn in the sprite. */
+      /** Read-only: each id's entry in the live furniture catalog (null when it isn't there): its category, footprint,
+       *  background rows, whether it can be placed on surfaces, sprite size and the count of distinct colours drawn in the sprite. */
       getCatalogEntries?: (ids: string[]) => Array<{
         id: string;
+        category: string;
+        canPlaceOnSurfaces: boolean;
         footprintW: number;
         footprintH: number;
         backgroundTiles: number;
@@ -186,6 +188,8 @@ export function installTestHooks(officeStateRef: { current: OfficeState | null }
       for (const row of entry.sprite) for (const px of row) if (px !== '') colors.add(px);
       return {
         id,
+        category: entry.category,
+        canPlaceOnSurfaces: entry.canPlaceOnSurfaces === true,
         footprintW: entry.footprintW,
         footprintH: entry.footprintH,
         backgroundTiles: entry.backgroundTiles ?? 0,

@@ -1,5 +1,5 @@
 /**
- * Aero's six furniture pieces: each sprite is a whole picture of its size, the merge adds them to the server's catalog
+ * Aero's seventeen furniture pieces: each sprite is a whole picture of its size, the merge adds them to the server's catalog
  * without touching a stock entry or the message, a bad catalog never throws, and a layout that names them draws them
  * and blocks the right tiles.
  */
@@ -13,6 +13,7 @@ import {
   aeroFurnitureCatalog,
   withAeroFurniture,
 } from '../src/aero/furniture.js';
+import { canPlaceFurniture } from '../src/office/editor/editorActions.js';
 import { OfficeState } from '../src/office/engine/officeState.js';
 import {
   buildDynamicCatalog,
@@ -35,7 +36,32 @@ const IDS = [
   'AERO_PINGPONG',
   'AERO_CONSOLE',
   'AERO_ARCADE',
+  'AERO_WATERCOOLER',
+  'AERO_POD_WHITEBOARD',
+  'AERO_FLOWER_POT',
+  'AERO_COFFEE_MACHINE',
+  'AERO_BUFFET_COUNTER',
+  'AERO_VENDING_MACHINE',
+  'AERO_SECURITY_DESK',
+  'AERO_TURNSTILE',
+  'AERO_BALCONY_RAILING',
+  'AERO_BALCONY_RAILING_SIDE',
+  'AERO_ASHTRAY_STAND',
 ];
+/** The category of each of the eleven newer pieces. */
+const CATEGORIES: Record<string, string> = {
+  AERO_WATERCOOLER: 'misc',
+  AERO_POD_WHITEBOARD: 'decor',
+  AERO_FLOWER_POT: 'decor',
+  AERO_COFFEE_MACHINE: 'misc',
+  AERO_BUFFET_COUNTER: 'misc',
+  AERO_VENDING_MACHINE: 'misc',
+  AERO_SECURITY_DESK: 'misc',
+  AERO_TURNSTILE: 'misc',
+  AERO_BALCONY_RAILING: 'decor',
+  AERO_BALCONY_RAILING_SIDE: 'decor',
+  AERO_ASHTRAY_STAND: 'misc',
+};
 /** The sizes the plan fixes: [width, height, footprintW, footprintH, backgroundTiles]. */
 const SIZES: Record<string, number[]> = {
   AERO_TOILET: [16, 32, 1, 2, 1],
@@ -44,6 +70,17 @@ const SIZES: Record<string, number[]> = {
   AERO_PINGPONG: [32, 32, 2, 2, 0],
   AERO_CONSOLE: [32, 32, 2, 2, 1],
   AERO_ARCADE: [16, 32, 1, 2, 1],
+  AERO_WATERCOOLER: [16, 32, 1, 2, 1],
+  AERO_POD_WHITEBOARD: [16, 32, 1, 2, 1],
+  AERO_FLOWER_POT: [16, 16, 1, 1, 0],
+  AERO_COFFEE_MACHINE: [16, 32, 1, 2, 1],
+  AERO_BUFFET_COUNTER: [32, 32, 2, 2, 1],
+  AERO_VENDING_MACHINE: [16, 32, 1, 2, 1],
+  AERO_SECURITY_DESK: [32, 32, 2, 2, 1],
+  AERO_TURNSTILE: [16, 32, 1, 2, 1],
+  AERO_BALCONY_RAILING: [16, 16, 1, 1, 0],
+  AERO_BALCONY_RAILING_SIDE: [16, 16, 1, 1, 0],
+  AERO_ASHTRAY_STAND: [16, 32, 1, 2, 1],
 };
 
 // A stand-in for what the server sends: one flat grey stock piece.
@@ -68,7 +105,7 @@ function stockSprites(): Record<string, SpriteData> {
   return { WHITEBOARD: Array.from({ length: 32 }, () => new Array<string>(16).fill(GREY)) };
 }
 
-test('the six grids are whole: the right size, only palette characters, drawn in every tile', () => {
+test('the seventeen grids are whole: the right size, only palette characters, drawn in every tile', () => {
   const sprites = buildAeroSprites();
   assert.deepEqual(Object.keys(sprites).sort(), [...IDS].sort());
   for (const id of IDS) {
@@ -110,10 +147,12 @@ test('every category is one of the editor categories, and never one the seat pic
     assert.ok(known.has(e.category), `${e.id}: ${e.category} is not in FURNITURE_CATEGORIES`);
     // chairs make seats, desks make work surfaces, electronics are PCs to the seat picker.
     assert.ok(!['chairs', 'desks', 'electronics'].includes(e.category), `${e.id}: ${e.category}`);
+    const want = CATEGORIES[e.id];
+    if (want) assert.equal(e.category, want, e.id);
   }
 });
 
-test('a seat facing the console or the arcade is not an electronics seat; a stock PC still makes one', () => {
+test('a seat facing any Aero piece is not an electronics seat; a stock PC still makes one', () => {
   const stock = stockCatalog();
   const sprite = (): SpriteData =>
     Array.from({ length: 32 }, () => new Array<string>(16).fill(GREY));
@@ -173,6 +212,7 @@ test('a seat facing the console or the arcade is not an electronics seat; a stoc
     'AERO_SINK',
     'AERO_FRIDGE',
     'AERO_PINGPONG',
+    ...IDS.slice(6),
   ]) {
     assert.equal(seatFacing(type, 4), false, type);
   }
@@ -190,12 +230,14 @@ test('the entries carry the plan sizes, a category that is never chairs, and no 
     assert.notEqual(e.category, 'chairs');
     assert.equal(e.isDesk, false);
     assert.equal(e.canPlaceOnWalls, false);
+    // Only the flower pot goes on a desk.
+    assert.equal(e.canPlaceOnSurfaces, e.id === 'AERO_FLOWER_POT', `${e.id} surface flag`);
     assert.equal(e.file, '');
     assert.equal(e.orientation, 'front');
   }
 });
 
-test('the merge adds the six, leaves the stock entry and its sprite alone, and never changes its inputs', () => {
+test('the merge adds all seventeen, leaves the stock entry and its sprite alone, and never changes its inputs', () => {
   const catalog = stockCatalog();
   const sprites = stockSprites();
   const before = JSON.stringify({ catalog, sprites });
@@ -232,18 +274,18 @@ test('an id the server already sent wins, and the catalog can be built twice', (
   }
 });
 
-test('bad input never throws, and a catalog with nothing the page can build gets none of the six', () => {
+test('bad input never throws, and a catalog with nothing the page can build gets none of the pieces', () => {
   const bad: unknown[] = [undefined, null, 5, 'x', {}, [null, 3, {}, { id: 7 }]];
   for (const b of bad) {
     const merged = withAeroFurniture(b as never, b as never);
-    assert.deepEqual(merged.catalog, [], 'no six on a catalog with no entry');
+    assert.deepEqual(merged.catalog, [], 'no pieces on a catalog with no entry');
     assert.deepEqual(Object.keys(merged.sprites), []);
   }
   // Entries but no sprite for any: nothing the page could build either.
   const noSprites = withAeroFurniture(stockCatalog(), {});
   assert.equal(noSprites.catalog.length, 1);
   assert.deepEqual(Object.keys(noSprites.sprites), []);
-  // One good entry among bad ones still gets the six, and the bad ones are dropped.
+  // One good entry among bad ones still gets the pieces, and the bad ones are dropped.
   const mixed = withAeroFurniture([null, ...stockCatalog(), { id: 7 }] as never, stockSprites());
   assert.equal(mixed.catalog.length, 1 + IDS.length);
   for (const id of IDS) assert.ok(mixed.sprites[id], id);
@@ -272,7 +314,7 @@ test('a later empty catalog does not wipe the one the page built', () => {
   }
 });
 
-test('a layout naming the six draws them and blocks their tiles by footprint and background rows', () => {
+test('a layout naming the first six draws them and blocks their tiles by footprint and background rows', () => {
   const m = withAeroFurniture(stockCatalog(), stockSprites());
   buildDynamicCatalog({ catalog: m.catalog, sprites: m.sprites });
   const furniture: PlacedFurniture[] = [
@@ -295,4 +337,79 @@ test('a layout naming the six draws them and blocks their tiles by footprint and
   assert.ok(!blocked.has('4,4') && !blocked.has('5,4'));
   assert.ok(blocked.has('4,5') && blocked.has('5,5'));
   assert.equal(blocked.size, 4 + 4 + 2);
+});
+
+test('a layout naming all seventeen blocks exactly the footprint rows below each background row', () => {
+  const m = withAeroFurniture(stockCatalog(), stockSprites());
+  buildDynamicCatalog({ catalog: m.catalog, sprites: m.sprites });
+  const furniture: PlacedFurniture[] = IDS.map((type, i) => ({
+    uid: `p${i}`,
+    type,
+    col: (i % 6) * 3,
+    row: Math.floor(i / 6) * 4,
+  }));
+  assert.equal(layoutToFurnitureInstances(furniture).length, IDS.length);
+  const blocked = getBlockedTiles(furniture);
+  let want = 0;
+  for (const [i, id] of IDS.entries()) {
+    const [, , fw, fh, bg] = SIZES[id] as number[];
+    const col = (i % 6) * 3;
+    const row = Math.floor(i / 6) * 4;
+    for (let dr = 0; dr < (fh as number); dr++) {
+      for (let dc = 0; dc < (fw as number); dc++) {
+        const isBlocked = blocked.has(`${col + dc},${row + dr}`);
+        assert.equal(isBlocked, dr >= (bg as number), `${id} ${dc},${dr}`);
+        if (dr >= (bg as number)) want++;
+      }
+    }
+  }
+  assert.equal(blocked.size, want);
+});
+
+test('the flower pot sits on a desk front row: accepted, in front of the desk, and blocks nothing more', () => {
+  const desk: AeroCatalogAsset = {
+    ...stockCatalog()[0]!,
+    id: 'DESK_FRONT',
+    name: 'Desk',
+    label: 'Desk',
+    category: 'desks',
+    width: 48,
+    height: 32,
+    footprintW: 3,
+    footprintH: 2,
+    isDesk: true,
+    canPlaceOnWalls: false,
+    backgroundTiles: 1,
+  };
+  const sprites = {
+    ...stockSprites(),
+    DESK_FRONT: Array.from({ length: 32 }, () => new Array<string>(48).fill(GREY)),
+  };
+  const m = withAeroFurniture([...stockCatalog(), desk], sprites);
+  assert.ok(buildDynamicCatalog({ catalog: m.catalog, sprites: m.sprites }));
+  const cols = 10;
+  const rows = 10;
+  const layout = {
+    version: 1 as const,
+    cols,
+    rows,
+    tiles: new Array<number>(cols * rows).fill(1) as never,
+    furniture: [{ uid: 'desk', type: 'DESK_FRONT', col: 2, row: 3 }] as PlacedFurniture[],
+  };
+  // The desk's front row (its bottom row), and its other tiles.
+  for (const col of [2, 3, 4]) {
+    assert.equal(canPlaceFurniture(layout, 'AERO_FLOWER_POT', col, 4), true, `front row ${col}`);
+  }
+  // A piece that isn't a surface piece can't go on the desk.
+  assert.equal(canPlaceFurniture(layout, 'AERO_TURNSTILE', 2, 3), false);
+  const withPot: PlacedFurniture[] = [
+    ...layout.furniture,
+    { uid: 'pot', type: 'AERO_FLOWER_POT', col: 3, row: 4 },
+  ];
+  const instances = layoutToFurnitureInstances(withPot);
+  assert.equal(instances[1]!.zY, instances[0]!.zY + 0.5);
+  assert.deepEqual(
+    [...getBlockedTiles(withPot)].sort(),
+    [...getBlockedTiles(layout.furniture)].sort(),
+  );
 });

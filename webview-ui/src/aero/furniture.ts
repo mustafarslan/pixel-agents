@@ -1,6 +1,7 @@
 /**
- * Aero's six extra pieces for the big office: a toilet, a sink with a mirror, a fridge, a ping-pong table, a TV with a
- * games console, and an arcade cabinet. The stock server (1.5.0) sends its own furniture and knows none of them, so
+ * Aero's seventeen extra pieces for the big office: a toilet, a sink with a mirror, a fridge, a ping-pong table, a TV with
+ * a games console, an arcade cabinet, a water cooler, a pod whiteboard, a flower pot (placeable on desks), a coffee
+ * machine, a buffet counter, a vending machine, a security desk, a turnstile, two railing sections and an ashtray stand. The stock server (1.5.0) sends its own furniture and knows none of them, so
  * they live in the page and are merged into the catalog at the one place the page receives it (`furnitureAssetsLoaded`).
  *
  * None is `electronics`: the stock seat picker treats that category as a PC and prefers a seat facing one, so agents would
@@ -41,6 +42,7 @@ function piece(
   footprintW: number,
   footprintH: number,
   backgroundTiles: number,
+  canPlaceOnSurfaces = false,
 ): AeroCatalogAsset {
   return {
     id,
@@ -54,13 +56,13 @@ function piece(
     footprintH,
     isDesk: false,
     canPlaceOnWalls: false,
-    canPlaceOnSurfaces: false,
+    canPlaceOnSurfaces,
     backgroundTiles,
     orientation: 'front',
   };
 }
 
-/** The six entries. Fresh objects each call, so a caller can't change the next one's. */
+/** The seventeen entries. Fresh objects each call, so a caller can't change the next one's. */
 export function aeroFurnitureCatalog(): AeroCatalogAsset[] {
   return [
     piece('AERO_TOILET', 'Toilet', 'misc', 16, 32, 1, 2, 1),
@@ -69,11 +71,23 @@ export function aeroFurnitureCatalog(): AeroCatalogAsset[] {
     piece('AERO_PINGPONG', 'Ping-pong table', 'misc', 32, 32, 2, 2, 0),
     piece('AERO_CONSOLE', 'TV and console', 'decor', 32, 32, 2, 2, 1),
     piece('AERO_ARCADE', 'Arcade cabinet', 'decor', 16, 32, 1, 2, 1),
+    piece('AERO_WATERCOOLER', 'Water cooler', 'misc', 16, 32, 1, 2, 1),
+    piece('AERO_POD_WHITEBOARD', 'Pod whiteboard', 'decor', 16, 32, 1, 2, 1),
+    // The only piece that sits on a desk's front row; blocks nothing of its own.
+    piece('AERO_FLOWER_POT', 'Flower pot', 'decor', 16, 16, 1, 1, 0, true),
+    piece('AERO_COFFEE_MACHINE', 'Coffee machine', 'misc', 16, 32, 1, 2, 1),
+    piece('AERO_BUFFET_COUNTER', 'Buffet counter', 'misc', 32, 32, 2, 2, 1),
+    piece('AERO_VENDING_MACHINE', 'Vending machine', 'misc', 16, 32, 1, 2, 1),
+    piece('AERO_SECURITY_DESK', 'Security desk', 'misc', 32, 32, 2, 2, 1),
+    piece('AERO_TURNSTILE', 'Turnstile', 'misc', 16, 32, 1, 2, 1),
+    piece('AERO_BALCONY_RAILING', 'Balcony railing', 'decor', 16, 16, 1, 1, 0),
+    piece('AERO_BALCONY_RAILING_SIDE', 'Balcony railing (side)', 'decor', 16, 16, 1, 1, 0),
+    piece('AERO_ASHTRAY_STAND', 'Ashtray stand', 'misc', 16, 32, 1, 2, 1),
   ];
 }
 
 /**
- * The server's catalog and sprites with Aero's six added. Never mutates its inputs, never throws on bad ones (a
+ * The server's catalog and sprites with Aero's seventeen added. Never mutates its inputs, never throws on bad ones (a
  * missing or malformed catalog or sprite map counts as empty, and a malformed entry is dropped), and an id the server already sent is left as it is.
  */
 export function withAeroFurniture<C extends { id: string }>(
@@ -87,7 +101,7 @@ export function withAeroFurniture<C extends { id: string }>(
   const incomingSprites: Record<string, SpriteData> =
     sprites !== null && typeof sprites === 'object' && !Array.isArray(sprites) ? sprites : {};
   // A catalog with no entry the page can build (none has a sprite) is not a catalog: it is returned as it is, so the page's
-  // build fails and keeps the previous catalog instead of replacing it with Aero's six alone.
+  // build fails and keeps the previous catalog instead of replacing it with Aero's pieces alone.
   if (!incoming.some((entry) => Array.isArray(incomingSprites[entry.id]))) {
     return { catalog: incoming, sprites: incomingSprites };
   }
