@@ -1058,10 +1058,11 @@ export class AeroOffice {
         this.greetArrival();
       return;
     }
-    const visible = this.personOnFloor(person);
     // Its stand-in is gone: walk back to the Lounge, or, with nobody looking, be there at once.
     if (person.subId !== null && !os.subagentMeta.has(person.subId)) {
       person.subId = null;
+      // Seen by where its home is (it was where the stand-in's lead is a moment ago).
+      const visible = this.personOnFloor(person);
       this.releaseBench(person, false);
       ch.isActive = false;
       const spot = this.freeLoungeTile();
@@ -1134,7 +1135,9 @@ export class AeroOffice {
       }
       ch.isActive = false;
       ch.wanderTimer = 1e9;
-      if (path.length > 0) {
+      // Already at a lift: it stops here, whatever old path it was walking.
+      if (path.length === 0) this.stand(ch);
+      else {
         ch.path = path;
         ch.moveProgress = 0;
         ch.state = CharacterState.WALK;
@@ -1374,11 +1377,15 @@ export class AeroOffice {
         this.people = this.people.filter((p) => p !== person);
         continue;
       }
-      if (onFloor.has(key(ch.tileCol, ch.tileRow))) continue;
-      const spot = this.freeLoungeTile();
-      if (!spot) continue;
-      ch.tileCol = spot.col;
-      ch.tileRow = spot.row;
+      // At home on the new layout: whatever it was walking to (the old Lounge, a trip back) ends here, on the Lounge floor.
+      if (!onFloor.has(key(ch.tileCol, ch.tileRow))) {
+        const spot = this.freeLoungeTile();
+        if (spot) {
+          ch.tileCol = spot.col;
+          ch.tileRow = spot.row;
+        }
+      }
+      person.returning = false;
       this.stand(ch);
       ch.wanderTimer = 1;
     }
@@ -1387,7 +1394,7 @@ export class AeroOffice {
   /**
    * A SubagentStart named `status`'s type. A lead on the floor on show: the subagent is matched at once (see `match`), and true
    * is returned when a configured character took its place. A lead of another floor: the subagent is queued with nobody assigned
-   * (this runs once per subagent), matched when its lead's floor is shown; false.
+   * (once: the tool-start message repeats, and `match` ignores a subagent it already holds), matched when its lead's floor is shown; false.
    */
   subagentStarted(parentId: number, parentToolId: string, status: unknown): boolean {
     const type = agentTypeFromStatus(status);
@@ -1427,7 +1434,7 @@ export class AeroOffice {
   /**
    * A free person of the floor on show and the type, else a free person of the lead's room (the Rooms style), else a free owner
    * person of the type whose roster the floor lacks, else nobody (the stock subagent stays). One that is still spawning matches
-   * too; one that is despawning does not. (Two subagents of one type at once: the second stays stock while the character is away.)
+   * too; one that is despawning does not. (Two subagents of one type at once: the second is a contractor of the floor, hired or reused, else stock.)
    */
   private match(lead: Character, parentToolId: string, type: string): boolean {
     const floorId = getAeroUpdate()?.floor?.id ?? null;
@@ -1450,7 +1457,12 @@ export class AeroOffice {
         (p) => own(p) && p.floor === null && p.room === null && this.homeOnFloor(p),
       ) ??
       this.people.find(
-        (p) => p.contractor !== undefined && free(p) && p.floor === floorId && p.slug === type,
+        (p) =>
+          p.contractor !== undefined &&
+          lead.directoryName !== PR_RUNS_ROOM &&
+          free(p) &&
+          p.floor === floorId &&
+          p.slug === type,
       ) ??
       null;
     if (!person) {
@@ -1475,6 +1487,8 @@ export class AeroOffice {
     // A free bench at a PC of the lead's pod, else the free tile nearest its desk (the lead's seat, not wherever the lead stands now:
     // a lead resting in the Lounge is not where the work is).
     if (lead.seatId && this.takeBench(person, lead.seatId)) return true;
+    // No bench: it stops what it was doing (a trip home, a walk to the lift) before it is routed, and stands if it cannot be.
+    this.stand(ch);
     const taken = this.occupied(Number.NaN);
     const leadSeat = lead.seatId ? this.os.seats.get(lead.seatId) : undefined;
     const anchor: Tile = leadSeat
@@ -1498,8 +1512,6 @@ export class AeroOffice {
         ch.state = CharacterState.WALK;
         ch.frame = 0;
         ch.frameTimer = 0;
-      } else {
-        ch.state = CharacterState.IDLE;
       }
     }
     return true;

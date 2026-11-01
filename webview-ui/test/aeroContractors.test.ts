@@ -1,9 +1,10 @@
 /**
- * Aero's front desk (docs/work/phase6-contractors/plan.md, task 3b round 1): the receptionist and the guard, seated on chairs held
- * from the moment the layout is built, never handed out by any seat pick, greeting real lead arrivals.
+ * Aero's front desk and contractors (docs/work/phase6-contractors/plan.md, task 3b): the receptionist and the guard, seated on chairs
+ * held from the moment the layout is built, never handed out by any seat pick, greeting real lead arrivals; and contractors hired out
+ * of the lifts, reused, sent out, and kept apart from the floors and leads they are not for.
  *
- * The layout is by hand: a 14x8 room with one ordinary desk seat, and the two desk chairs (the uids end the way the open office's
- * do) facing down.
+ * The first tests use a 14x8 room by hand with one ordinary desk seat and the two desk chairs (the uids end the way the open
+ * office's do) facing down; the contractor tests use `buildFloor` (Pod 1, the Lounge, two lifts).
  */
 
 import assert from 'node:assert/strict';
@@ -258,8 +259,31 @@ function loadCatalog(): void {
   });
   assert.ok(
     buildDynamicCatalog({
-      catalog: [entry('PC_OFF', 'off'), entry('PC_ON', 'on')],
-      sprites: { PC_OFF: sprite('#111111'), PC_ON: sprite('#22ff22') },
+      catalog: [
+        entry('PC_OFF', 'off'),
+        entry('PC_ON', 'on'),
+        // The chairs, so a layout build makes seats of them as the page does.
+        {
+          ...entry('CUSHIONED_CHAIR_FRONT', 'off'),
+          category: 'chairs',
+          groupId: undefined,
+          state: undefined,
+          orientation: 'front',
+        },
+        {
+          ...entry('CUSHIONED_BENCH', 'off'),
+          category: 'chairs',
+          groupId: undefined,
+          state: undefined,
+          orientation: 'front',
+        },
+      ],
+      sprites: {
+        PC_OFF: sprite('#111111'),
+        PC_ON: sprite('#22ff22'),
+        CUSHIONED_CHAIR_FRONT: sprite('#884422'),
+        CUSHIONED_BENCH: sprite('#884422'),
+      },
     }),
   );
   catalogReady = true;
@@ -597,4 +621,164 @@ test('a layout rebuild takes away a contractor on its way out', () => {
   os.update(0.1);
   os.update(0.1);
   assert.equal(contractors(os).length, 0);
+});
+
+// ── The fix round ──────────────────────────────────────────────────
+
+const freeContractor = (os: OfficeState) => {
+  const p = os.aero.people.find((x) => x.contractor)!;
+  return p;
+};
+
+test('a PR-run lead never reuses a contractor: past the free people the subagent is stock', () => {
+  const os = floorA();
+  os.addAgent(2, 0, 0, undefined, true, PR_RUNS_ROOM);
+  start(os);
+  const b = start(os);
+  run(os, 8);
+  os.removeSubagent(1, b.tool);
+  run(os, 3);
+  assert.equal(contractors(os)[0].away, false, 'the contractor is free');
+  const pr = start(os, 'reviewer', 2);
+  assert.equal(pr.ok, false, 'the person is busy, the free contractor is not for a PR run');
+  assert.equal(freeContractor(os).subId, null);
+  assert.equal(os.characters.get(os.getSubagentId(2, pr.tool)!)!.aeroHidden, undefined);
+});
+
+test('a subagent of another floor never reuses this floor’s free contractor: it hires its own, numbered per floor', () => {
+  const os = floorA(buildFloor(), [...staff(FA, 'reviewer'), ...staff(FB, 'reviewer')]);
+  start(os);
+  const b = start(os);
+  run(os, 8);
+  os.removeSubagent(1, b.tool);
+  run(os, 3);
+  const a = freeContractor(os);
+  assert.equal(a.subId, null);
+  assert.ok(setAeroUpdate(upd(FB, [...staff(FA, 'reviewer'), ...staff(FB, 'reviewer')])));
+  os.addAgent(2, 0, 0, undefined, true, FB);
+  os.setAgentActive(2, true);
+  run(os, 1);
+  assert.equal(start(os, 'reviewer', 2).ok, true, 'floor B’s own reviewer');
+  assert.equal(start(os, 'reviewer', 2).ok, true, 'a contractor of floor B');
+  assert.equal(a.subId, null, 'floor A’s contractor is untouched');
+  const all = os.aero.snapshot().people.filter((p) => p.kind === 'contractor');
+  assert.deepEqual(all.map((c) => [c.floor, c.number]).sort(), [
+    [FA, 2],
+    [FB, 2],
+  ]);
+});
+
+test('a type the floor’s roster lacks is stock, with the floor’s person busy or not', () => {
+  const os = floorA();
+  start(os);
+  for (const type of ['planner', 'general-purpose']) {
+    assert.equal(start(os, type).ok, false, type);
+  }
+  assert.equal(contractors(os).length, 0);
+});
+
+test('a rebuilt layout drops a saved seat on a desk chair: the hold runs before the first pass', () => {
+  loadCatalog();
+  const os = new OfficeState(layoutOf(true));
+  assert.ok(os.seats.has(GUARD) && os.seats.has(DESK), 'the catalog gives the chairs seats');
+  assert.equal(os.seats.get(GUARD)!.assigned, true, 'held from the build');
+  os.addAgent(1, 0, 0, undefined, true);
+  const ch = os.characters.get(1)!;
+  assert.equal(ch.seatId, DESK);
+  // The agent’s saved seat is the guard’s chair.
+  ch.seatId = GUARD;
+  os.rebuildFromLayout(layoutOf(true));
+  assert.notEqual(ch.seatId, GUARD);
+  assert.notEqual(ch.seatId, RECEPTION);
+  assert.equal(os.seats.get(GUARD)!.assigned, true);
+});
+
+test('a contractor expiring on a lobby tile while walking stands and despawns there', () => {
+  const os = floorA();
+  start(os);
+  const b = start(os);
+  run(os, MATRIX_EFFECT_DURATION + 0.5);
+  const p = freeContractor(os);
+  os.removeSubagent(1, b.tool);
+  p.contractor!.idle = 119.95;
+  // On a lift tile, on its way somewhere (an old path).
+  p.ch.tileCol = 11;
+  p.ch.tileRow = 8;
+  p.ch.x = 11 * 16 + 8;
+  p.ch.y = 8 * 16 + 8;
+  p.ch.path = [
+    { col: 12, row: 8 },
+    { col: 13, row: 8 },
+  ];
+  p.ch.state = CharacterState.WALK;
+  os.update(0.1);
+  assert.equal(p.contractor!.leaving, true);
+  assert.equal(p.ch.matrixEffect, 'despawn');
+  assert.notEqual(p.ch.state, CharacterState.WALK);
+  assert.deepEqual([p.ch.tileCol, p.ch.tileRow], [11, 8]);
+  assert.deepEqual(p.ch.path, []);
+});
+
+test('a stand-in for a PR-run lead whose home floor is not shown goes home unseen, not frozen at its desk', () => {
+  const os = floorA();
+  os.addAgent(2, 0, 0, undefined, true, PR_RUNS_ROOM);
+  const t = start(os, 'reviewer', 2);
+  assert.equal(t.ok, true);
+  const p = os.aero.people.find((x) => !x.contractor)!;
+  run(os, 3);
+  assert.ok(setAeroUpdate(upd(FB, staff(FA, 'reviewer'))));
+  run(os, 1);
+  assert.equal(os.aero.personOnFloor(p), true, 'the PR run is on every floor, so is its stand-in');
+  os.removeSubagent(2, t.tool);
+  os.update(0.1);
+  assert.equal(os.aero.personOnFloor(p), false, 'home is on floor A');
+  assert.notEqual(p.ch.state, CharacterState.WALK);
+  assert.equal(p.returning, false);
+  assert.ok(p.ch.tileCol >= 16, `snapped to the Lounge, at ${p.ch.tileCol},${p.ch.tileRow}`);
+});
+
+test('a layout rebuild stands the people at home even on the Lounge floor: nothing walks on, no stray poof', () => {
+  const os = floorA();
+  const t = start(os);
+  const p = os.aero.people.find((x) => !x.contractor)!;
+  run(os, 5);
+  os.removeSubagent(1, t.tool);
+  until(
+    os,
+    () => p.ch.tileCol >= 16 && p.ch.state === CharacterState.WALK,
+    60,
+    'walking home, on the Lounge',
+  );
+  assert.equal(p.returning, true);
+  const poofs = os.aero.snapshot().fxStarted.poof ?? 0;
+  os.seats = new Map(os.seats);
+  os.update(0.1);
+  assert.equal(p.returning, false);
+  assert.notEqual(p.ch.state, CharacterState.WALK);
+  assert.deepEqual(p.ch.path, []);
+  run(os, 10);
+  assert.equal(os.aero.snapshot().fxStarted.poof ?? 0, poofs, 'no poof after the rebuild');
+});
+
+test('a reused leaving contractor with nowhere to route stops its walk to the lift', () => {
+  const os = floorA();
+  start(os);
+  start(os);
+  const c = start(os);
+  assert.equal(c.ok, true);
+  run(os, 8);
+  os.removeSubagent(1, c.tool);
+  const p = os.aero.people.filter((x) => x.contractor).find((x) => x.contractor!.number === 3)!;
+  until(
+    os,
+    () => p.contractor!.leaving && p.ch.state === CharacterState.WALK,
+    200,
+    'walking to the lift',
+  );
+  os.walkableTiles = [];
+  const again = start(os);
+  assert.equal(again.ok, true, 'reused');
+  assert.equal(p.contractor!.leaving, false);
+  assert.notEqual(p.ch.state, CharacterState.WALK);
+  assert.deepEqual(p.ch.path, []);
 });
