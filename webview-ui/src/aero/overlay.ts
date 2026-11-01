@@ -31,6 +31,9 @@ import { drawPods } from './pods.js';
 import { badgeText, clip } from './update.js';
 
 const FONT = "'FS Pixel Sans', monospace";
+const PROTON_NAME = 'Proton';
+/** The name's baseline over her feet: her 16 px sprite and one pixel. */
+const PROTON_NAME_RISE = 17;
 const SPRITE_H = 24;
 
 /** The top-centre of a character's sprite, in world pixels. */
@@ -282,5 +285,16 @@ export function drawAeroOverlay(
     const top = spriteTop(ch);
     drawName(ctx, name, offsetX + top.x * zoom, offsetY + (top.y - 1) * zoom, zoom);
   }
+
+  // Proton's name, over her head like the people's: she is not a character and stays out of the labels.
+  const cat = os.aero.protonView();
+  if (cat)
+    drawName(
+      ctx,
+      PROTON_NAME,
+      offsetX + cat.x * zoom,
+      offsetY + (cat.y - PROTON_NAME_RISE) * zoom,
+      zoom,
+    );
   ctx.restore();
 }

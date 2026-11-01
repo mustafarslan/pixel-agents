@@ -287,6 +287,14 @@ interface ZDrawable {
   draw: (ctx: CanvasRenderingContext2D) => void;
 }
 
+/** A sprite the host draws among the characters (Aero's cat): bottom-centre at pixel (x, y), sorted by `zY`. */
+export interface ExtraSprite {
+  sprite: SpriteData;
+  x: number;
+  y: number;
+  zY: number;
+}
+
 /** @internal */
 export function renderScene(
   ctx: CanvasRenderingContext2D,
@@ -298,6 +306,7 @@ export function renderScene(
   selectedAgentId: number | null,
   hoveredAgentId: number | null,
   pets: Pet[] = [],
+  extras: readonly ExtraSprite[] = [],
 ): void {
   const drawables: ZDrawable[] = [];
 
@@ -417,6 +426,19 @@ export function renderScene(
 
     drawables.push({
       zY: petZY,
+      draw: (c) => {
+        c.drawImage(cached, drawX, drawY);
+      },
+    });
+  }
+
+  // ── Extra sprites (Aero's cat) ─────────────────────────
+  for (const extra of extras) {
+    const cached = getCachedSprite(extra.sprite, zoom);
+    const drawX = Math.round(offsetX + extra.x * zoom - cached.width / 2);
+    const drawY = Math.round(offsetY + extra.y * zoom - cached.height);
+    drawables.push({
+      zY: extra.zY,
       draw: (c) => {
         c.drawImage(cached, drawX, drawY);
       },
@@ -818,6 +840,7 @@ export function renderFrame(
   activeAreaLabel?: string | null,
   pets?: Pet[],
   hiddenAreaLabels?: ReadonlySet<string>,
+  extras?: readonly ExtraSprite[],
 ): { offsetX: number; offsetY: number } {
   // Clear
   ctx.clearRect(0, 0, canvasWidth, canvasHeight);
@@ -874,6 +897,7 @@ export function renderFrame(
     selectedId,
     hoveredId,
     pets ?? [],
+    extras ?? [],
   );
 
   // Character speech bubbles render in ToolOverlay (DOM, above the labels).

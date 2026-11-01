@@ -12,6 +12,7 @@
 import { createCharacter, updateCharacter } from '../office/engine/characters.js';
 import { advanceMatrixEffect, startMatrixEffect } from '../office/engine/matrixEffectState.js';
 import type { OfficeState } from '../office/engine/officeState.js';
+import type { ExtraSprite } from '../office/engine/renderer.js';
 import { getCatalogEntry } from '../office/layout/furnitureCatalog.js';
 import { findPath } from '../office/layout/tileMap.js';
 import { getLoadedCharacterCount } from '../office/sprites/spriteData.js';
@@ -38,6 +39,18 @@ import {
   whiteboardRect,
 } from './lounge.js';
 import { assignFirstNames, lookKey, pickLook, roleFromSlug } from './names.js';
+import {
+  ATRIUM_HEAD,
+  CAFE_SPOTS,
+  podOrigins,
+  Proton,
+  type ProtonArea,
+  protonArea,
+  type ProtonSpot,
+  protonSpriteOf,
+  type ProtonWorld,
+  type SpotKind,
+} from './proton.js';
 import { buildStations, type Station, type StationBook, type StationGroup } from './stations.js';
 import {
   type AeroFloor,
@@ -183,6 +196,10 @@ const CONTRACTOR_CAP = 8;
 const CONTRACTOR_IDLE_SEC = 120;
 const CONTRACTOR_ID_BASE = PERSON_ID_BASE - 2_000_000;
 const LIFT_TYPE = 'AERO_ELEVATOR';
+const TURNSTILE_TYPE = 'AERO_TURNSTILE';
+const TERRACE_LABEL = 'Terrace';
+/** How far below its tile's centre she is drawn on a seat, as a seated person (a cat is lower on a sofa). */
+const PROTON_SEAT_DROP_PX = 3;
 const LIFT_WIDTH_FALLBACK = 2;
 
 /** The receptionist or the guard: seated at a held chair, never in `characters`, `people` or any seat pick. */
@@ -391,6 +408,12 @@ export class AeroOffice {
   private nextPersonSlot = 0;
   /** The tiles in front of the lifts (the top row of each `AERO_ELEVATOR`, unblocked): where contractors arrive and leave. */
   lobby: Tile[] = [];
+  /** Proton, the owner's cat: one for the office, whichever floor is on show. Made on the first tick she shows. */
+  proton: Proton | null = null;
+  /** Her tiles, her own blocked set and the spots that do not change with the layout (worked out in `refresh`). */
+  private area: ProtonArea | null = null;
+  private napSeats: Array<Tile & { seat: string }> = [];
+  private fixedSpots: Record<'sun' | 'desk' | 'cafe', Tile[]> = { sun: [], desk: [], cafe: [] };
 
   private readonly os: OfficeState;
 
@@ -439,6 +462,7 @@ export class AeroOffice {
         return Array.from({ length: w }, (_, i) => ({ col: f.col + i, row: f.row }));
       })
       .filter((t) => !blocked.has(key(t.col, t.row)));
+    this.refreshProton();
     this.book = buildStations(os);
     // The seats are new: borrowed stations are let go, and taken again by the tick.
     for (const loose of [...this.people, ...this.subs.values()]) {
@@ -460,6 +484,202 @@ export class AeroOffice {
     this.props.clear();
     this.os.refreshFurniture();
     this.rehomePeople();
+  }
+
+  // ── Proton ───────────────────────────────────────────────────────
+
+  /**
+   * Works out where Proton may go, once per layout: the labelled, unblocked, reachable tiles that are not the toilets, the lift lobby
+   * or the turnstile throat, plus the sofa and Lounge seats beside them; her own blocked set; and the spots that stay put (the sun, a
+   * pod's desks, the café). Her seat is dropped and her tile checked again: if it is no longer hers she is put on another.
+   */
+  private refreshProton(): void {
+    const os = this.os;
+    const types = new Map(os.layout.furniture.map((f) => [f.uid, f.type] as const));
+    const baseType = (uid: string): string | undefined =>
+      types.get(uid) ??
+      (uid.includes(':') ? types.get(uid.slice(0, uid.lastIndexOf(':'))) : undefined);
+    const sofas: Array<Tile & { seat: string }> = [];
+    for (const seat of os.seats.values()) {
+      const type = baseType(seat.uid);
+      if (type === 'SOFA_FRONT' || type === 'SOFA_SIDE') {
+        sofas.push({ col: seat.seatCol, row: seat.seatRow, seat: seat.uid });
+      }
+    }
+    const loungeSeats: Tile[] = [];
+    for (const uid of this.lounge?.seats ?? []) {
+      const seat = os.seats.get(uid);
+      if (seat) loungeSeats.push({ col: seat.seatCol, row: seat.seatRow });
+    }
+    const turnstiles = os.layout.furniture
+      .filter((f) => f.type === TURNSTILE_TYPE)
+      .map((f) => {
+        const entry = getCatalogEntry(f.type);
+        return { col: f.col, row: f.row, w: entry?.footprintW ?? 1, h: entry?.footprintH ?? 2 };
+      });
+    const { cols, rows, areaTiles } = os.layout;
+    const area = protonArea({
+      cols,
+      rows,
+      areaTiles,
+      blocked: os.blockedTiles,
+      lobby: this.lobby,
+      turnstiles,
+      sofaSeats: sofas,
+      loungeSeats,
+    });
+    this.area = area;
+    this.napSeats = sofas.filter((s) => area.seats.has(key(s.col, s.row)));
+    const inside = (tiles: readonly Tile[]): Tile[] =>
+      tiles.filter((t) => area.walk.has(key(t.col, t.row)));
+    const terrace: Tile[] = [];
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        if (areaTiles?.[row * cols + col] === TERRACE_LABEL) terrace.push({ col, row });
+      }
+    }
+    this.fixedSpots = {
+      sun: inside([...terrace, ...ATRIUM_HEAD]),
+      desk: inside(
+        podOrigins(areaTiles, cols, rows).flatMap((o) => [
+          { col: o.col + 2, row: o.row + 2 },
+          { col: o.col + 4, row: o.row + 2 },
+        ]),
+      ),
+      cafe: inside(CAFE_SPOTS),
+    };
+    const cat = this.proton;
+    if (cat) {
+      cat.giveUp();
+      if (!this.protonTileAllowed(cat.col, cat.row)) this.placeProton(cat);
+    }
+  }
+
+  private protonTileAllowed(col: number, row: number): boolean {
+    const k = key(col, row);
+    return !!this.area && (this.area.walk.has(k) || this.area.seats.has(k));
+  }
+
+  /** Every tile Proton may be on: the walkable ones and the sofa and Lounge seats beside them. */
+  protonAllowed(): ReadonlySet<string> {
+    this.refresh();
+    const out = new Set<string>();
+    for (const k of this.area?.walk ?? []) out.add(k);
+    for (const k of this.area?.seats ?? []) out.add(k);
+    return out;
+  }
+
+  /** Puts the cat on a random tile of her area (the injected rng). */
+  private placeProton(cat: Proton): void {
+    const tiles = [...(this.area?.walk ?? [])];
+    if (tiles.length === 0) return;
+    const [col, row] = tiles[Math.floor(this.rng() * tiles.length) % tiles.length]
+      .split(',')
+      .map(Number);
+    cat.place({ col, row });
+  }
+
+  /** She shows only with live pods and the Lounge on, so the Rooms style and an Aero that is off have no cat. */
+  private protonOn(update: AeroUpdate | null): boolean {
+    return update !== null && this.podsInForce() && !!this.area && this.area.walk.size > 0;
+  }
+
+  /** Whether a nap seat is still hers to take: it exists, nobody holds it, no route or station targets it, nobody stands on it. */
+  private napFree(uid: string, taken?: Set<string>): boolean {
+    const seat = this.os.seats.get(uid);
+    if (!seat || seat.assigned) return false;
+    const k = key(seat.seatCol, seat.seatRow);
+    if (!this.area?.seats.has(k)) return false;
+    return !(taken ?? this.occupied(Number.NaN)).has(k);
+  }
+
+  private protonWorld(update: AeroUpdate): ProtonWorld {
+    const area = this.area!;
+    return {
+      rng: () => this.rng(),
+      lunch: update.lunch,
+      blocked: area.blocked,
+      tileMap: this.os.tileMap,
+      walk: area.walk,
+      spots: (kind) => this.protonSpots(kind),
+    };
+  }
+
+  /** The spots of a kind that are free now. */
+  private protonSpots(kind: SpotKind): ProtonSpot[] {
+    switch (kind) {
+      case 'sun':
+      case 'desk':
+      case 'cafe':
+        return this.fixedSpots[kind];
+      case 'sofa': {
+        const taken = this.occupied(Number.NaN);
+        return this.napSeats
+          .filter((s) => this.napFree(s.seat, taken))
+          .map((s) => ({ col: s.col, row: s.row, seat: s.seat }));
+      }
+      case 'agent': {
+        const taken = this.occupied(Number.NaN);
+        const workers: Character[] = [];
+        for (const c of this.os.characters.values()) {
+          if (!this.hides(c) && c.state === CharacterState.TYPE && c.matrixEffect !== 'despawn') {
+            workers.push(c);
+          }
+        }
+        for (const person of this.people) {
+          if (this.personOnFloor(person) && person.ch.state === CharacterState.TYPE) {
+            workers.push(person.ch);
+          }
+        }
+        const out = new Map<string, ProtonSpot>();
+        for (const w of workers) {
+          for (const [dc, dr] of [
+            [0, -1],
+            [0, 1],
+            [-1, 0],
+            [1, 0],
+          ] as const) {
+            const col = w.tileCol + dc;
+            const row = w.tileRow + dr;
+            const k = key(col, row);
+            if (this.area?.walk.has(k) && !taken.has(k)) out.set(k, { col, row });
+          }
+        }
+        return [...out.values()];
+      }
+    }
+  }
+
+  /** Once a tick: she lets go of a seat that is wanted, then walks or waits. */
+  private stepProton(dt: number, update: AeroUpdate | null): void {
+    if (update === null || !this.protonOn(update)) return;
+    let cat = this.proton;
+    if (!cat) {
+      cat = new Proton({ col: 0, row: 0 });
+      this.proton = cat;
+      this.placeProton(cat);
+    }
+    if (cat.seat !== null && !this.napFree(cat.seat)) cat.giveUp();
+    cat.update(dt, this.protonWorld(update));
+  }
+
+  /** What the renderer draws for her, or null when she is not on show. */
+  protonView(): ExtraSprite | null {
+    const cat = this.proton;
+    if (!cat || !this.protonOn(getAeroUpdate())) return null;
+    const seated = cat.seat !== null && cat.mode !== 'walk';
+    return {
+      sprite: protonSpriteOf(cat.mode, cat.dir, cat.clock),
+      x: cat.x,
+      y: cat.y + (seated ? PROTON_SEAT_DROP_PX : 0),
+      zY: cat.y + TILE_SIZE / 2,
+    };
+  }
+
+  /** The extra sprites for the renderer: Proton, or none. */
+  protonSprites(): ExtraSprite[] {
+    const view = this.protonView();
+    return view ? [view] : [];
   }
 
   /**
@@ -1136,6 +1356,7 @@ export class AeroOffice {
     this.matchQueued();
     this.watchUpdate(update);
     for (const person of [...this.people]) this.stepPerson(person, dt);
+    this.stepProton(dt, update);
     this.fx.update(dt);
     for (const npc of this.npcs) npc.greet = Math.max(0, npc.greet - dt);
   }
@@ -2366,6 +2587,7 @@ export class AeroOffice {
           directoryName: c.directoryName ?? null,
           shown: !this.hides(c),
           dir: c.dir,
+          seat: c.seatId ?? null,
         })),
       subagents: [...this.os.characters.values()]
         .filter((c) => c.isSubagent)
@@ -2400,6 +2622,17 @@ export class AeroOffice {
       })),
       greetings: { ...this.greetings },
       labels: this.labels(true).map((l) => ({ ...l })),
+      proton:
+        this.proton && this.protonOn(update)
+          ? {
+              col: this.proton.col,
+              row: this.proton.row,
+              mode: this.proton.mode,
+              moves: this.proton.moves,
+              seat: this.proton.seat,
+              spot: this.proton.spot,
+            }
+          : null,
     };
   }
 }
@@ -2465,6 +2698,8 @@ export interface AeroSnapshot {
     /** Drawn: not a hidden stock subagent and on the floor on show. */
     shown: boolean;
     dir: number;
+    /** The seat it holds, or null. */
+    seat: string | null;
   }>;
   /** Every stock subagent: where it works. */
   subagents: Array<{
@@ -2505,4 +2740,13 @@ export interface AeroSnapshot {
   greetings: Record<DeskRole, number>;
   /** The name over each character on show: its key, its sprite's palette, its first name and its role. */
   labels: NameLabel[];
+  /** Proton, the owner's cat: her tile, what she does, the tiles she has stepped, the nap seat she holds and the kind of spot; null when not on show. */
+  proton: {
+    col: number;
+    row: number;
+    mode: string;
+    moves: number;
+    seat: string | null;
+    spot: string | null;
+  } | null;
 }

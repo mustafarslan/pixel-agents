@@ -226,6 +226,7 @@ export function OfficeCanvas({
           activeAreaLabel,
           officeState.pets,
           officeState.aero.podLabelKeys(),
+          officeState.aero.protonSprites(),
         );
         offsetRef.current = { x: offsetX, y: offsetY };
         // Aero: badges, names, bubbles and the wall objects' text, over the stock frame.
