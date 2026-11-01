@@ -391,6 +391,7 @@ export class OfficeState {
     this.layout = layout || createDefaultLayout();
     this.tileMap = layoutToTileMap(this.layout);
     this.seats = layoutToSeats(this.layout.furniture);
+    this.aero.holdFrontDesk();
     this.blockedTiles = getBlockedTiles(this.layout.furniture);
     this.furniture = layoutToFurnitureInstances(this.layout.furniture);
     this.walkableTiles = getWalkableTiles(this.tileMap, this.blockedTiles);
@@ -438,6 +439,8 @@ export class OfficeState {
     for (const seat of this.seats.values()) {
       seat.assigned = false;
     }
+    // Aero: the front desk's chairs are held before any character is kept on, or given, a seat.
+    this.aero.holdFrontDesk();
 
     // First pass: try to keep characters at their existing seats
     for (const ch of this.characters.values()) {
@@ -853,6 +856,8 @@ export class OfficeState {
     this.characters.set(id, ch);
     // Aero: a character of another floor holds no seat; the sync lets go of the one it was just given.
     this.aero.syncMappings();
+    // Aero: a real arrival on the floor on show (a spawn effect; a restore passes none) is greeted at the front desk.
+    if (!skipSpawnEffect && !this.aero.isOffFloor(id)) this.aero.greetArrival();
   }
 
   // ── Greeter ───────────────────────────────────────────────────

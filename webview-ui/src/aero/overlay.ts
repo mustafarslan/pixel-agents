@@ -202,6 +202,14 @@ export function drawAeroOverlay(
     drawBubble(ctx, text, offsetX + top.x * zoom, offsetY + (top.y - 1) * zoom, zoom);
   }
 
+  // The front desk's greetings.
+  for (const npc of os.aero.npcs) {
+    const text = os.aero.greetingFor(npc);
+    if (!text) continue;
+    const top = spriteTop(npc.ch);
+    drawBubble(ctx, text, offsetX + top.x * zoom, offsetY + (top.y - 1) * zoom, zoom);
+  }
+
   // The configured characters' names.
   for (const person of os.aero.people) {
     if (person.ch.matrixEffect || !os.aero.personOnFloor(person)) continue;

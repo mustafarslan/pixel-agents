@@ -112,7 +112,9 @@ const wantedPeople = new WeakMap<AeroUpdate, ReadonlyMap<string, string>>();
 function wantedOf(update: AeroUpdate): ReadonlyMap<string, string> {
   let map = wantedPeople.get(update);
   if (!map) {
-    map = new Map(update.agents.map((a) => [personId(a.floor ?? null, a.room ?? null, a.slug), a.name]));
+    map = new Map(
+      update.agents.map((a) => [personId(a.floor ?? null, a.room ?? null, a.slug), a.name]),
+    );
     wantedPeople.set(update, map);
   }
   return map;
@@ -140,6 +142,37 @@ const CANDIDATES_TRIED = 8;
 const FX_BURST_DROP = 15;
 const FX_COUNTDOWN_DROP = 0;
 const FX_POOF_DROP = 8;
+
+/** The front desk's chairs and people: one chair type, told apart by the layout's uids (an index suffix breaks on a reorder). */
+const DESK_CHAIR_TYPE = 'CUSHIONED_CHAIR_FRONT';
+const DESK_ROLES = [
+  {
+    role: 'receptionist',
+    mark: '-reception-',
+    id: PERSON_ID_BASE - 1_000_000,
+    palette: 1,
+    bubble: '\u{1F44B}',
+  },
+  {
+    role: 'guard',
+    mark: '-security-',
+    id: PERSON_ID_BASE - 1_000_001,
+    palette: 2,
+    bubble: '\u{1FAAA}',
+  },
+] as const;
+export type DeskRole = (typeof DESK_ROLES)[number]['role'];
+const GREET_SHOW_SEC = 3;
+
+/** The receptionist or the guard: seated at a held chair, never in `characters`, `people` or any seat pick. */
+export interface DeskNpc {
+  role: DeskRole;
+  seatUid: string;
+  ch: Character;
+  /** Seconds left of the greeting bubble; 0 when none shows. */
+  greet: number;
+  bubble: string;
+}
 
 export type RouteMode = 'rest' | 'lunch';
 
@@ -227,6 +260,14 @@ export class AeroOffice {
 
   private cachedLayout: unknown = null;
   private cachedSeats: unknown = null;
+
+  /** The front desk's people (a layout with the chairs has them) and the chairs they were found for. */
+  npcs: DeskNpc[] = [];
+  /** Greetings shown so far, per role (counted, so a short bubble isn't missed by a poll). */
+  private greetings: Record<DeskRole, number> = { receptionist: 0, guard: 0 };
+  private deskLayout: unknown = null;
+  private deskSeats: unknown = null;
+  private deskChairs: Array<{ role: DeskRole; uid: string }> = [];
   private nextPersonSlot = 0;
 
   private readonly os: OfficeState;
@@ -281,6 +322,71 @@ export class AeroOffice {
     this.borrowed.clear();
     this.os.refreshFurniture();
     this.rehomePeople();
+  }
+
+  /**
+   * Holds the front desk's chairs (`assigned`, so no seat pick, overflow stage or `closestFreeSeat` hands them out) and seats the
+   * receptionist and the guard on them, facing down. Run first by every sync and by a layout build, so the chairs are held from the
+   * moment the seats exist; a layout without the chairs (the Rooms style) has no desk people.
+   */
+  holdFrontDesk(): void {
+    const os = this.os;
+    if (this.deskLayout !== os.layout.furniture) {
+      this.deskLayout = os.layout.furniture;
+      this.deskSeats = null;
+      this.deskChairs = [];
+      for (const d of DESK_ROLES) {
+        const f = os.layout.furniture.find(
+          (x) => x.type === DESK_CHAIR_TYPE && x.uid.includes(d.mark),
+        );
+        if (f) this.deskChairs.push({ role: d.role, uid: f.uid });
+      }
+    }
+    for (const c of this.deskChairs) {
+      const seat = os.seats.get(c.uid);
+      if (seat) seat.assigned = true;
+    }
+    if (this.deskSeats === os.seats) return;
+    this.deskSeats = os.seats;
+    const next: DeskNpc[] = [];
+    for (const d of DESK_ROLES) {
+      const chair = this.deskChairs.find((c) => c.role === d.role);
+      const seat = chair ? os.seats.get(chair.uid) : undefined;
+      if (!chair || !seat) continue;
+      const kept = this.npcs.find((n) => n.role === d.role);
+      const palettes = Math.max(1, getLoadedCharacterCount());
+      const ch = kept?.ch ?? createCharacter(d.id, d.palette % palettes, chair.uid, seat, 0);
+      ch.seatId = chair.uid;
+      ch.isActive = false;
+      ch.state = CharacterState.TYPE;
+      ch.frame = 0;
+      ch.dir = Direction.DOWN;
+      ch.tileCol = seat.seatCol;
+      ch.tileRow = seat.seatRow;
+      ch.x = seat.seatCol * TILE_SIZE + TILE_SIZE / 2;
+      ch.y = seat.seatRow * TILE_SIZE + TILE_SIZE / 2;
+      next.push({
+        role: d.role,
+        seatUid: chair.uid,
+        ch,
+        greet: kept?.greet ?? 0,
+        bubble: d.bubble,
+      });
+    }
+    this.npcs = next;
+  }
+
+  /** A lead arrived on the floor (a real arrival, not a restore or a floor switch): the desk greets it. */
+  greetArrival(): void {
+    for (const npc of this.npcs) {
+      npc.greet = GREET_SHOW_SEC;
+      this.greetings[npc.role]++;
+    }
+  }
+
+  /** The greeting bubble the NPC of `role` shows now, or null. */
+  greetingFor(npc: DeskNpc): string | null {
+    return npc.greet > 0 ? npc.bubble : null;
   }
 
   /** Whether the office has what the routing needs: an update that says there is a Lounge, and the Lounge itself. */
@@ -621,6 +727,7 @@ export class AeroOffice {
    * Aero's pods and floor nothing here runs.
    */
   syncMappings(): void {
+    this.holdFrontDesk();
     if (this.syncing) return;
     this.syncing = true;
     try {
@@ -796,6 +903,7 @@ export class AeroOffice {
     this.watchUpdate(update);
     for (const person of [...this.people]) this.stepPerson(person, dt);
     this.fx.update(dt);
+    for (const npc of this.npcs) npc.greet = Math.max(0, npc.greet - dt);
   }
 
   // ── Effects (pixelfx) ───────────────────────────────────────────
@@ -1147,7 +1255,8 @@ export class AeroOffice {
       const lead = this.os.characters.get(q.parentId);
       const subId = this.os.getSubagentId(q.parentId, q.toolId);
       const sub = subId === null ? undefined : this.os.characters.get(subId);
-      if (!lead || !sub || sub.matrixEffect === 'despawn' || lead.matrixEffect === 'despawn') continue;
+      if (!lead || !sub || sub.matrixEffect === 'despawn' || lead.matrixEffect === 'despawn')
+        continue;
       if (this.onFloor(lead) && this.peopleReady()) this.match(lead, q.toolId, q.type);
       else keep.push(q);
     }
@@ -1169,7 +1278,9 @@ export class AeroOffice {
     const person =
       this.people.find((p) => free(p) && p.floor !== null && p.floor === floorId) ??
       this.people.find((p) => free(p) && p.room !== null && p.room === lead.directoryName) ??
-      this.people.find((p) => free(p) && p.floor === null && p.room === null && this.homeOnFloor(p));
+      this.people.find(
+        (p) => free(p) && p.floor === null && p.room === null && this.homeOnFloor(p),
+      );
     if (!person) return false;
     const subId = this.os.getSubagentId(lead.id, parentToolId);
     const sub = subId === null ? undefined : this.os.characters.get(subId);
@@ -1221,8 +1332,10 @@ export class AeroOffice {
 
   /** The characters the renderer draws: `list` less the hidden stock subagents, plus the configured ones. */
   characters(list: Character[]): Character[] {
+    this.holdFrontDesk();
     const shown = list.filter((ch) => !this.hides(ch));
     for (const person of this.people) if (this.personOnFloor(person)) shown.push(person.ch);
+    for (const npc of this.npcs) shown.push(npc.ch);
     return shown;
   }
 
@@ -1260,6 +1373,7 @@ export class AeroOffice {
   /** What the `getAero` test hook shows. */
   snapshot(): AeroSnapshot {
     this.refresh();
+    this.holdFrontDesk();
     const update = getAeroUpdate();
     return {
       update,
@@ -1314,6 +1428,16 @@ export class AeroOffice {
       hidden: [...this.os.characters.values()].filter((c) => c.aeroHidden).map((c) => c.id),
       fxStarted: { ...this.fx.started },
       badges: Object.fromEntries(this.badgeCounts()),
+      npcs: this.npcs.map((n) => ({
+        role: n.role,
+        seat: n.seatUid,
+        id: n.ch.id,
+        col: n.ch.tileCol,
+        row: n.ch.tileRow,
+        dir: n.ch.dir,
+        greeting: this.greetingFor(n),
+      })),
+      greetings: { ...this.greetings },
     };
   }
 }
@@ -1370,4 +1494,16 @@ export interface AeroSnapshot {
   /** How many effects of each kind have started (counted, so a short one isn't missed by a poll). */
   fxStarted: Record<string, number>;
   badges: Record<string, number>;
+  /** The front desk's people: where they sit and the bubble they show. */
+  npcs: Array<{
+    role: DeskRole;
+    seat: string;
+    id: number;
+    col: number;
+    row: number;
+    dir: number;
+    greeting: string | null;
+  }>;
+  /** How many greetings each role has shown. */
+  greetings: Record<DeskRole, number>;
 }
