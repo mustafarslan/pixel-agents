@@ -19,7 +19,6 @@ import type { Tile } from './lounge.js';
 // ── Her look ───────────────────────────────────────────────────────
 
 /** Cream body and shadow, blue-grey points and their dark tip, sapphire eyes, a pink nose and the outline. */
-/* eslint-disable pixel-agents/no-inline-colors -- sprite data: the palette of her grids, as the sprites' own files */
 export const PROTON_PALETTE: Readonly<Record<string, string>> = {
   c: '#f5efe2',
   d: '#dfd6c5',
@@ -29,7 +28,6 @@ export const PROTON_PALETTE: Readonly<Record<string, string>> = {
   n: '#d98695',
   o: '#3f3740',
 };
-/* eslint-enable pixel-agents/no-inline-colors */
 
 export type ProtonMode = 'walk' | 'sit' | 'sleep' | 'groom' | 'stretch' | 'knead';
 type Frames = readonly [readonly string[], readonly string[], readonly string[]];

@@ -42,7 +42,13 @@ export default defineConfig([
     },
   },
   {
-    files: ['src/constants.ts', 'src/fonts/**', 'src/office/sprites/**', 'test/**'],
+    files: [
+      'src/constants.ts',
+      'src/fonts/**',
+      'src/office/sprites/**',
+      'src/aero/proton.ts',
+      'test/**',
+    ],
     rules: {
       'pixel-agents/no-inline-colors': 'off',
       'pixel-agents/pixel-shadow': 'off',
