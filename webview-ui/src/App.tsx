@@ -493,6 +493,7 @@ function App() {
         showAreas={effectiveShowAreas}
         activeAreaLabel={activeAreaLabel}
         tapSelectsFirst={isMobile}
+        alwaysShowOverlay={alwaysShowOverlay}
       />
 
       {!isDebugMode ? (

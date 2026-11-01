@@ -11,11 +11,14 @@ import assert from 'node:assert/strict';
 
 import { afterEach, test } from 'vitest';
 
+import { hashKey, MEN_NAMES, WOMEN_NAMES } from '../src/aero/names.js';
 import { PERSON_ID_BASE, resetAeroUpdate, setAeroUpdate } from '../src/aero/office.js';
+import { drawAeroOverlay } from '../src/aero/overlay.js';
 import { PR_RUNS_ROOM } from '../src/aero/update.js';
 import { AREA_LABEL_FALLBACK_COLOR } from '../src/constants.js';
 import { OfficeState } from '../src/office/engine/officeState.js';
 import { buildDynamicCatalog } from '../src/office/layout/furnitureCatalog.js';
+import { getLoadedCharacterCount } from '../src/office/sprites/spriteData.js';
 import type { OfficeLayout, PlacedFurniture, Seat } from '../src/office/types.js';
 import {
   CharacterState,
@@ -781,4 +784,151 @@ test('a reused leaving contractor with nowhere to route stops its walk to the li
   assert.equal(p.contractor!.leaving, false);
   assert.notEqual(p.ch.state, CharacterState.WALK);
   assert.deepEqual(p.ch.path, []);
+});
+
+// ── Names and roles over the characters (docs/work/phase6-office-look/plan.md, task A) ──
+
+const labelsOf = (os: OfficeState) => os.aero.snapshot().labels;
+const labelOf = (os: OfficeState, kind: string, key?: string) =>
+  labelsOf(os).find((l) => l.kind === kind && (key === undefined || l.key === key))!;
+
+/** What `drawAeroOverlay` draws on a recording stub: the texts with their position, and the filled rectangles. */
+function drawn(
+  os: OfficeState,
+  show?: { alwaysShowOverlay: boolean; hoveredId: number | null; selectedId: number | null },
+) {
+  const texts: Array<{ text: string; x: number; y: number }> = [];
+  const rects: Array<{ y: number; h: number }> = [];
+  const ctx = new Proxy(
+    {},
+    {
+      get(_t, prop) {
+        if (prop === 'fillText')
+          return (text: string, x: number, y: number) => texts.push({ text, x, y });
+        if (prop === 'fillRect')
+          return (_x: number, y: number, _w: number, h: number) => rects.push({ y, h });
+        if (prop === 'measureText') return () => ({ width: 8 });
+        return () => undefined;
+      },
+      set: () => true,
+    },
+  ) as unknown as CanvasRenderingContext2D;
+  drawAeroOverlay(ctx, os, 0, 0, 2, show);
+  return { texts, rects };
+}
+
+test('labels: a person has a key, a palette hashed from it, a first name of its look, and its role from the slug', () => {
+  const os = floorA(buildFloor(), staff(FA, 'code-reviewer', 'architect'));
+  const palettes = Math.max(1, getLoadedCharacterCount());
+  for (const [slug, role] of [
+    ['code-reviewer', 'Reviewer'],
+    ['architect', 'Architect'],
+  ] as const) {
+    const l = labelOf(os, 'person', `${FA}//${slug}`);
+    assert.ok(l, slug);
+    assert.equal(l.role, role);
+    assert.equal(
+      l.palette,
+      hashKey(l.key) % palettes,
+      'the palette follows the key, not the order',
+    );
+    assert.ok((l.palette % 2 === 0 ? MEN_NAMES : WOMEN_NAMES).includes(l.first), l.first);
+    assert.equal(
+      os.aero.people.find((p) => p.slug === slug)!.ch.palette,
+      l.palette,
+      'the label says the sprite’s palette',
+    );
+  }
+});
+
+test('labels: the front desk is Reception on a woman’s palette and Security on a man’s', () => {
+  const os = floorA();
+  const rec = labelOf(os, 'desk', 'desk/receptionist');
+  const guard = labelOf(os, 'desk', 'desk/guard');
+  assert.equal(rec.role, 'Reception');
+  assert.equal(guard.role, 'Security');
+  assert.equal(rec.palette % 2, 1);
+  assert.equal(guard.palette % 2, 0);
+  assert.ok(WOMEN_NAMES.includes(rec.first));
+  assert.ok(MEN_NAMES.includes(guard.first));
+});
+
+test('labels: a contractor says Reviewer #2, a lead Lead, a PR run’s lead PR, and a stock subagent Subagent', () => {
+  const os = floorA();
+  start(os);
+  start(os);
+  assert.equal(labelOf(os, 'contractor').role, 'Reviewer #2');
+  assert.match(labelOf(os, 'contractor').key, new RegExp(`^${FA}//reviewer#2$`));
+  assert.equal(labelOf(os, 'lead').role, 'Lead');
+  // A stock subagent nobody stands in for (no roster type matches) stays a stock character.
+  os.addSubagent(1, 'plain');
+  assert.equal(os.aero.subagentStarted(1, 'plain', 'Subtask: nobody-has-this'), false);
+  assert.equal(labelOf(os, 'subagent').role, 'Subagent');
+  // Another lead in the PR runs' folder.
+  os.addAgent(2, 0, 0, undefined, true, FA);
+  os.characters.get(2)!.directoryName = PR_RUNS_ROOM;
+  const pr = labelsOf(os).find((l) => l.id === 2)!;
+  assert.equal(pr.role, 'PR');
+  assert.equal(pr.kind, 'lead');
+});
+
+test('labels: the names on show are all different, and the same after a reload', () => {
+  const agents = staff(FA, 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h');
+  const first = floorA(buildFloor(), agents);
+  start(first);
+  const before = labelsOf(first);
+  assert.ok(before.length >= 10);
+  assert.equal(new Set(before.map((l) => l.first)).size, before.length, 'unique on the floor');
+  assert.equal(new Set(before.map((l) => l.key)).size, before.length, 'unique keys');
+  resetAeroUpdate();
+  const again = floorA(buildFloor(), agents);
+  start(again);
+  const pick = (os: OfficeState) =>
+    Object.fromEntries(
+      labelsOf(os)
+        .filter((l) => l.kind !== 'lead' && l.kind !== 'subagent')
+        .map((l) => [l.key, `${l.first}/${l.palette}`]),
+    );
+  assert.deepEqual(pick(again), pick(first));
+});
+
+test('the overlay draws one line, Name · Role, with the bubble above it', () => {
+  const os = floorA();
+  const label = labelOf(os, 'person', `${FA}//reviewer`);
+  const { texts } = drawn(os);
+  const mine = texts.filter((t) => t.text.includes('Reviewer'));
+  assert.deepEqual(
+    mine.map((t) => t.text),
+    [`${label.first} · Reviewer`, `${label.first} · Reviewer`],
+    'one line (drawn twice, the shadow and the ink), not a name and a role apart',
+  );
+  const guard = labelOf(os, 'desk', 'desk/guard');
+  assert.ok(texts.some((t) => t.text === `${guard.first} · Security`));
+  // A greeting bubble stands above the guard’s line.
+  os.aero.npcs.find((n) => n.role === 'guard')!.greet = 2;
+  const withBubble = drawn(os);
+  const line = withBubble.texts.filter((t) => t.text === `${guard.first} · Security`).pop()!;
+  const bubble = withBubble.texts.find((t) => t.text === '\u{1FAAA}')!;
+  assert.equal(bubble.x, line.x, 'over the same centre');
+  assert.ok(bubble.y < line.y - 4, `the bubble (${bubble.y}) is above the name line (${line.y})`);
+});
+
+test('a lead’s name is hidden while the tool overlay shows for it: hovered, selected or always', () => {
+  const os = floorA();
+  const lead = labelOf(os, 'lead');
+  const text = `${lead.first} · Lead`;
+  const names = (show?: {
+    alwaysShowOverlay: boolean;
+    hoveredId: number | null;
+    selectedId: number | null;
+  }) => drawn(os, show).texts.filter((t) => t.text === text).length;
+  assert.equal(names(), 2, 'drawn by default');
+  assert.equal(names({ alwaysShowOverlay: false, hoveredId: null, selectedId: null }), 2);
+  assert.equal(names({ alwaysShowOverlay: false, hoveredId: 1, selectedId: null }), 0, 'hovered');
+  assert.equal(names({ alwaysShowOverlay: false, hoveredId: null, selectedId: 1 }), 0, 'selected');
+  assert.equal(names({ alwaysShowOverlay: true, hoveredId: null, selectedId: null }), 0, 'always');
+  // The people have no tool overlay: their names stay.
+  const person = labelOf(os, 'person');
+  const stays = drawn(os, { alwaysShowOverlay: true, hoveredId: null, selectedId: null });
+  assert.ok(stays.texts.some((t) => t.text === `${person.first} · ${person.role}`));
 });

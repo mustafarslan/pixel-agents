@@ -1,5 +1,5 @@
 /**
- * Aero's eighteen furniture pieces: each sprite is a whole picture of its size, the merge adds them to the server's catalog
+ * Aero's twenty-two furniture pieces: each sprite is a whole picture of its size, the merge adds them to the server's catalog
  * without touching a stock entry or the message, a bad catalog never throws, and a layout that names them draws them
  * and blocks the right tiles.
  */
@@ -51,8 +51,12 @@ const IDS = [
   'AERO_BALCONY_RAILING_SIDE',
   'AERO_ASHTRAY_STAND',
   'AERO_ELEVATOR',
+  'AERO_GLASS_PARTITION',
+  'AERO_GLASS_PARTITION_SIDE',
+  'AERO_PLANTER_DIVIDER',
+  'AERO_PLANTER_DIVIDER_SIDE',
 ];
-/** The category of each of the twelve newer pieces. */
+/** The category of each of the sixteen newer pieces. */
 const CATEGORIES: Record<string, string> = {
   AERO_WATERCOOLER: 'misc',
   AERO_POD_WHITEBOARD: 'decor',
@@ -66,6 +70,10 @@ const CATEGORIES: Record<string, string> = {
   AERO_BALCONY_RAILING_SIDE: 'decor',
   AERO_ASHTRAY_STAND: 'misc',
   AERO_ELEVATOR: 'misc',
+  AERO_GLASS_PARTITION: 'decor',
+  AERO_GLASS_PARTITION_SIDE: 'decor',
+  AERO_PLANTER_DIVIDER: 'decor',
+  AERO_PLANTER_DIVIDER_SIDE: 'decor',
 };
 /** The sizes the plan fixes: [width, height, footprintW, footprintH, backgroundTiles]. */
 const SIZES: Record<string, number[]> = {
@@ -87,6 +95,10 @@ const SIZES: Record<string, number[]> = {
   AERO_BALCONY_RAILING_SIDE: [16, 16, 1, 1, 0],
   AERO_ASHTRAY_STAND: [16, 32, 1, 2, 1],
   AERO_ELEVATOR: [32, 32, 2, 2, 1],
+  AERO_GLASS_PARTITION: [16, 32, 1, 2, 1],
+  AERO_GLASS_PARTITION_SIDE: [16, 32, 1, 2, 1],
+  AERO_PLANTER_DIVIDER: [16, 32, 1, 2, 1],
+  AERO_PLANTER_DIVIDER_SIDE: [16, 32, 1, 2, 1],
 };
 
 // A stand-in for what the server sends: one flat grey stock piece.
@@ -111,7 +123,7 @@ function stockSprites(): Record<string, SpriteData> {
   return { WHITEBOARD: Array.from({ length: 32 }, () => new Array<string>(16).fill(GREY)) };
 }
 
-test('the eighteen grids are whole: the right size, only palette characters, drawn in every tile', () => {
+test('the twenty-two grids are whole: the right size, only palette characters, drawn in every tile', () => {
   const sprites = buildAeroSprites();
   assert.deepEqual(Object.keys(sprites).sort(), [...IDS].sort());
   for (const id of IDS) {
@@ -239,11 +251,11 @@ test('the entries carry the plan sizes, a category that is never chairs, and no 
     // Only the flower pot goes on a desk.
     assert.equal(e.canPlaceOnSurfaces, e.id === 'AERO_FLOWER_POT', `${e.id} surface flag`);
     assert.equal(e.file, '');
-    assert.equal(e.orientation, e.id === 'AERO_BALCONY_RAILING_SIDE' ? 'side' : 'front', e.id);
+    assert.equal(e.orientation, e.id.endsWith('_SIDE') ? 'side' : 'front', e.id);
   }
 });
 
-test('the merge adds all eighteen, leaves the stock entry and its sprite alone, and never changes its inputs', () => {
+test('the merge adds all twenty-two, leaves the stock entry and its sprite alone, and never changes its inputs', () => {
   const catalog = stockCatalog();
   const sprites = stockSprites();
   const before = JSON.stringify({ catalog, sprites });
@@ -345,7 +357,7 @@ test('a layout naming the first six draws them and blocks their tiles by footpri
   assert.equal(blocked.size, 4 + 4 + 2);
 });
 
-test('a layout naming all eighteen blocks exactly the footprint rows below each background row', () => {
+test('a layout naming all twenty-two blocks exactly the footprint rows below each background row', () => {
   const m = withAeroFurniture(stockCatalog(), stockSprites());
   buildDynamicCatalog({ catalog: m.catalog, sprites: m.sprites });
   const furniture: PlacedFurniture[] = IDS.map((type, i) => ({
@@ -438,8 +450,22 @@ test('the two railings are one rotation group: the palette shows it once, rotati
     palette.map((e) => e.type),
     [front],
   );
-  // Nothing else of Aero's is a rotation group.
-  for (const id of IDS.filter((i) => !i.startsWith('AERO_BALCONY'))) {
+  // The glass partitions and the planter dividers are two more such groups; nothing else of Aero's is a rotation group.
+  for (const group of ['AERO_GLASS_PARTITION', 'AERO_PLANTER_DIVIDER']) {
+    assert.equal(isRotatable(group), true, group);
+    assert.equal(isRotatable(`${group}_SIDE`), true, `${group}_SIDE`);
+    assert.equal(getRotatedType(group, 'cw'), `${group}_SIDE`);
+    assert.equal(getRotatedType(`${group}_SIDE`, 'cw'), group);
+    assert.ok(getCatalogEntry(group) && getCatalogEntry(`${group}_SIDE`));
+    const shown = getCatalogByCategory('decor').filter((e) => e.type.startsWith(group));
+    assert.deepEqual(
+      shown.map((e) => e.type),
+      [group],
+      `${group}: only the front piece is in the palette`,
+    );
+  }
+  const grouped = ['AERO_BALCONY', 'AERO_GLASS_PARTITION', 'AERO_PLANTER_DIVIDER'];
+  for (const id of IDS.filter((i) => !grouped.some((g) => i.startsWith(g)))) {
     assert.equal(isRotatable(id), false, id);
   }
 });
@@ -457,7 +483,7 @@ test('the hook fields the self-test reads: desk and wall flags, uniform rows, pa
       `${id} uniform rows`,
     );
     const inPalette = getCatalogByCategory(entry.category).some((e) => e.type === id);
-    assert.equal(inPalette, id !== 'AERO_BALCONY_RAILING_SIDE', `${id} palette`);
+    assert.equal(inPalette, !id.endsWith('_SIDE'), `${id} palette`);
   }
 });
 

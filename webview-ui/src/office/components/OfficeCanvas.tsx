@@ -65,6 +65,8 @@ interface OfficeCanvasProps {
    *  character fires onClick (opens its terminal). Desktop keeps single-click
    *  focus with tap-again-to-deselect. */
   tapSelectsFirst?: boolean;
+  /** The settings toggle that keeps every status label open: Aero's names give way to those labels. */
+  alwaysShowOverlay?: boolean;
 }
 
 export function OfficeCanvas({
@@ -85,10 +87,14 @@ export function OfficeCanvas({
   showAreas,
   activeAreaLabel,
   tapSelectsFirst = false,
+  alwaysShowOverlay = false,
 }: OfficeCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const offsetRef = useRef({ x: 0, y: 0 });
+  // Read by the render loop each frame, so a settings change doesn't restart it.
+  const alwaysShowRef = useRef(alwaysShowOverlay);
+  alwaysShowRef.current = alwaysShowOverlay;
   // Middle-mouse pan state (imperative, no re-renders)
   const isPanningRef = useRef(false);
   const panStartRef = useRef({ mouseX: 0, mouseY: 0, panX: 0, panY: 0 });
@@ -223,7 +229,11 @@ export function OfficeCanvas({
         );
         offsetRef.current = { x: offsetX, y: offsetY };
         // Aero: badges, names, bubbles and the wall objects' text, over the stock frame.
-        drawAeroOverlay(ctx, officeState, offsetX, offsetY, zoom);
+        drawAeroOverlay(ctx, officeState, offsetX, offsetY, zoom, {
+          alwaysShowOverlay: alwaysShowRef.current,
+          hoveredId: officeState.hoveredAgentId,
+          selectedId: officeState.selectedAgentId,
+        });
 
         // Store delete/rotate button bounds for hit-testing
         deleteButtonBoundsRef.current = editorRender?.deleteButtonBounds ?? null;

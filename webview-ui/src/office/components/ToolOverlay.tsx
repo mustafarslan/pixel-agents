@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
 
+import { bubbleLift } from '../../aero/overlay.js';
 import { Button } from '../../components/ui/Button.js';
 import {
   BUBBLE_FADE_DURATION_SEC,
@@ -185,9 +186,16 @@ export function ToolOverlay({
                 // Bubble bottom sits one sprite pixel above the character's
                 // anchor: project the anchor, then lift by the bubble's own
                 // device-pixel height plus one zoomed pixel, in CSS px.
+                // Aero: a name line stands over the character, and the bubble stacks above it.
                 top:
                   project.toScreenY(ch.y + bubbleSittingOff - BUBBLE_VERTICAL_OFFSET_PX) -
-                  (cachedBubble.height + zoom) / dpr,
+                  (cachedBubble.height + zoom) / dpr -
+                  bubbleLift(officeState, ch, zoom, {
+                    alwaysShowOverlay,
+                    hoveredId,
+                    selectedId,
+                  }) /
+                    dpr,
                 opacity: alpha,
                 zIndex: OVERLAY_BUBBLE_Z_INDEX,
               }}

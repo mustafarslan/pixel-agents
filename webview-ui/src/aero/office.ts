@@ -29,6 +29,7 @@ import {
   wallHit,
   whiteboardRect,
 } from './lounge.js';
+import { assignFirstNames, hashKey, roleFromSlug } from './names.js';
 import {
   type AeroFloor,
   type AeroPods,
@@ -224,6 +225,22 @@ export interface Contractor {
   /** Walking to the lift to leave: still reusable until its despawn starts. */
   leaving: boolean;
 }
+
+/** What a character is, for its name's role and its key. */
+export type LabelKind = 'person' | 'contractor' | 'desk' | 'lead' | 'teammate' | 'subagent';
+
+/** The name over a character: `first` and `role` make the line `Ava · Reviewer`. */
+export interface NameLabel {
+  id: number;
+  kind: LabelKind;
+  /** What the first name is made from: stable for the character (never a transcript's text). */
+  key: string;
+  palette: number;
+  first: string;
+  role: string;
+}
+
+const DESK_LABEL_ROLES: Record<DeskRole, string> = { receptionist: 'Reception', guard: 'Security' };
 
 /** A subagent whose lead was off the floor on show when it started: matched when the lead's floor is shown. */
 interface QueuedSubagent {
@@ -1051,12 +1068,15 @@ export class AeroOffice {
       if (!spot) continue;
       const slot = this.nextPersonSlot++;
       const palettes = Math.max(1, getLoadedCharacterCount());
+      // The look follows the person's key, not the order it was made in, so its first name (made from the palette) is the same
+      // whenever it is made.
+      const look = hashKey(idOf(floor, room, agent.slug));
       const ch = createCharacter(
         PERSON_ID_BASE - slot,
-        slot % palettes,
+        look % palettes,
         null,
         null,
-        Math.floor(slot / palettes) * 60,
+        (Math.floor(look / palettes) % 6) * 60,
       );
       ch.isActive = false;
       ch.state = CharacterState.IDLE;
@@ -1096,7 +1116,10 @@ export class AeroOffice {
    * people do not stack when their floor comes round; the shown people of another floor do not count. When that leaves no tile, the
    * tiles of the people shown now are all it counts.
    */
-  private freeLoungeTile(home?: { floor: string | null; room: string | null }, self?: Person): Tile | null {
+  private freeLoungeTile(
+    home?: { floor: string | null; room: string | null },
+    self?: Person,
+  ): Tile | null {
     const taken = this.occupied(Number.NaN);
     // The tiles the characters hold, and, of the people, only those that can be shown with this one (not the shown people of
     // another floor, whom this one is never seen beside).
@@ -1104,7 +1127,8 @@ export class AeroOffice {
     if (home) {
       const sharedWith = (other: Person): boolean => {
         if (!getAeroUpdate()?.floor) return true;
-        const owner = (p: { floor: string | null; room: string | null }) => p.floor === null && p.room === null;
+        const owner = (p: { floor: string | null; room: string | null }) =>
+          p.floor === null && p.room === null;
         if (owner(home) || owner(other)) return true;
         return (
           (home.floor !== null && other.floor === home.floor) ||
@@ -1636,6 +1660,83 @@ export class AeroOffice {
     return this.enabled() ? wallHit(this.lounge, x, y) : null;
   }
 
+  private labelCache: { sig: string; labels: NameLabel[] } | null = null;
+
+  /**
+   * The name over every character on show. Keys: a person by `floor/room/slug` (a contractor's adds `#number`), the front desk by
+   * role, a lead by its folder and its rank by id among the leads of that folder, a teammate by its lead's key and its rank, and a
+   * stock subagent likewise by its parent's. Nothing from a transcript (`agentName`, a subagent's type) is used. The first names are
+   * made together (see `assignFirstNames`), so no two on show are the same.
+   */
+  labels(): NameLabel[] {
+    type Entry = Omit<NameLabel, 'first'>;
+    const entries: Entry[] = [];
+    for (const p of this.people) {
+      if (!this.personOnFloor(p)) continue;
+      const base = personId(p.floor, p.room, p.slug);
+      entries.push({
+        id: p.ch.id,
+        kind: p.contractor ? 'contractor' : 'person',
+        key: p.contractor ? `${base}#${p.contractor.number}` : base,
+        palette: p.ch.palette,
+        role: p.contractor
+          ? `${roleFromSlug(p.slug)} #${p.contractor.number}`
+          : roleFromSlug(p.slug),
+      });
+    }
+    for (const n of this.npcs) {
+      entries.push({
+        id: n.ch.id,
+        kind: 'desk',
+        key: `desk/${n.role}`,
+        palette: n.ch.palette,
+        role: DESK_LABEL_ROLES[n.role],
+      });
+    }
+    const shown = [...this.os.characters.values()].filter((c) => !this.hides(c) && !c.isGreeter);
+    const keyOf = new Map<number, string>();
+    const rankIn = (group: Character[], ch: Character, descending: boolean): number =>
+      [...group].sort((a, b) => (descending ? b.id - a.id : a.id - b.id)).indexOf(ch);
+    const leads = shown.filter((c) => !c.isSubagent && c.leadAgentId === undefined);
+    for (const ch of leads) {
+      const folder = ch.directoryName ?? '';
+      const key = `lead/${folder}/${rankIn(
+        leads.filter((o) => (o.directoryName ?? '') === folder),
+        ch,
+        false,
+      )}`;
+      keyOf.set(ch.id, key);
+      entries.push({
+        id: ch.id,
+        kind: 'lead',
+        key,
+        palette: ch.palette,
+        role: folder === PR_RUNS_ROOM ? 'PR' : 'Lead',
+      });
+    }
+    const keyOfParent = (id: number | null | undefined): string =>
+      (id === null || id === undefined ? undefined : keyOf.get(id)) ?? 'lead/?';
+    const mates = shown.filter((c) => !c.isSubagent && c.leadAgentId !== undefined);
+    for (const ch of mates) {
+      const group = mates.filter((o) => o.leadAgentId === ch.leadAgentId);
+      const key = `${keyOfParent(ch.leadAgentId)}/mate/${rankIn(group, ch, false)}`;
+      keyOf.set(ch.id, key);
+      entries.push({ id: ch.id, kind: 'teammate', key, palette: ch.palette, role: 'Teammate' });
+    }
+    const subs = shown.filter((c) => c.isSubagent);
+    for (const ch of subs) {
+      const group = subs.filter((o) => o.parentAgentId === ch.parentAgentId);
+      const key = `${keyOfParent(ch.parentAgentId)}/sub/${rankIn(group, ch, true)}`;
+      entries.push({ id: ch.id, kind: 'subagent', key, palette: ch.palette, role: 'Subagent' });
+    }
+    const sig = entries.map((e) => `${e.key}|${e.palette}|${e.role}|${e.id}`).join('\n');
+    if (this.labelCache?.sig === sig) return this.labelCache.labels;
+    const firsts = assignFirstNames(entries);
+    const labels = entries.map((e) => ({ ...e, first: firsts.get(e.key) ?? '' }));
+    this.labelCache = { sig, labels };
+    return labels;
+  }
+
   /** What the `getAero` test hook shows. */
   snapshot(): AeroSnapshot {
     this.refresh();
@@ -1709,6 +1810,7 @@ export class AeroOffice {
         greeting: this.greetingFor(n),
       })),
       greetings: { ...this.greetings },
+      labels: this.labels().map((l) => ({ ...l })),
     };
   }
 }
@@ -1785,4 +1887,6 @@ export interface AeroSnapshot {
   }>;
   /** How many greetings each role has shown. */
   greetings: Record<DeskRole, number>;
+  /** The name over each character on show: its key, its sprite's palette, its first name and its role. */
+  labels: NameLabel[];
 }

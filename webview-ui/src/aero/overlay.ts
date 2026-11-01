@@ -27,6 +27,7 @@ import { drawEffects } from './effects.js';
 import { fitCached } from './fit.js';
 import { drawFloorSign } from './floorSign.js';
 import { clockPlateRect, whiteboardRect } from './lounge.js';
+import type { NameLabel } from './office.js';
 import { drawPods } from './pods.js';
 import { badgeText, clip } from './update.js';
 
@@ -41,6 +42,54 @@ export function spriteTop(ch: Character): { x: number; y: number } {
 
 function fontPx(zoom: number, worldPx: number): number {
   return Math.max(7, Math.round(worldPx * zoom));
+}
+
+/** What the tool overlay (the status label panels over the canvas) is showing for: its panel replaces a character's name. */
+export interface OverlayShow {
+  alwaysShowOverlay: boolean;
+  hoveredId: number | null;
+  selectedId: number | null;
+}
+
+/**
+ * The name line over a character, or null when none shows: the character has a label, is not spawning or leaving, and the tool
+ * overlay is not showing its panel (only characters in `os.characters` have one; a person or the front desk never does).
+ */
+function nameFor(
+  os: OfficeState,
+  labels: ReadonlyMap<number, NameLabel>,
+  ch: Character,
+  show: OverlayShow | undefined,
+): string | null {
+  const label = labels.get(ch.id);
+  if (!label || ch.matrixEffect) return null;
+  if (
+    show &&
+    os.characters.has(ch.id) &&
+    (show.alwaysShowOverlay || show.hoveredId === ch.id || show.selectedId === ch.id)
+  ) {
+    return null;
+  }
+  return `${label.first} \u00b7 ${label.role}`;
+}
+
+/** How far a bubble over a character with a name line is lifted, in canvas pixels. */
+export function nameLineLift(zoom: number): number {
+  return fontPx(zoom, 4.5) + 3;
+}
+
+/**
+ * The lift a bubble over `ch` needs now: one name line when its name is drawn, else none. The tool overlay's bubbles use it too, so
+ * both stack above the line.
+ */
+export function bubbleLift(
+  os: OfficeState,
+  ch: Character,
+  zoom: number,
+  show: OverlayShow | undefined,
+): number {
+  const labels = new Map(os.aero.labels().map((l) => [l.id, l] as const));
+  return nameFor(os, labels, ch, show) === null || os.aero.hides(ch) ? 0 : nameLineLift(zoom);
 }
 
 function plate(
@@ -176,8 +225,11 @@ export function drawAeroOverlay(
   offsetX: number,
   offsetY: number,
   zoom: number,
+  show?: OverlayShow,
 ): void {
   ctx.save();
+  const labels = new Map(os.aero.labels().map((l) => [l.id, l] as const));
+  const lift = nameLineLift(zoom);
   // The effects first: the text of the wall objects, the badges and the names stay readable over them.
   drawPods(ctx, os, offsetX, offsetY, zoom);
   drawEffects(ctx, os.aero.fx, offsetX, offsetY, zoom);
@@ -199,7 +251,8 @@ export function drawAeroOverlay(
     const ch = os.characters.get(route);
     if (!text || !ch || os.aero.hides(ch)) continue;
     const top = spriteTop(ch);
-    drawBubble(ctx, text, offsetX + top.x * zoom, offsetY + (top.y - 1) * zoom, zoom);
+    const up = nameFor(os, labels, ch, show) === null ? 0 : lift;
+    drawBubble(ctx, text, offsetX + top.x * zoom, offsetY + (top.y - 1) * zoom - up, zoom);
   }
 
   // The front desk's greetings.
@@ -207,14 +260,22 @@ export function drawAeroOverlay(
     const text = os.aero.greetingFor(npc);
     if (!text) continue;
     const top = spriteTop(npc.ch);
-    drawBubble(ctx, text, offsetX + top.x * zoom, offsetY + (top.y - 1) * zoom, zoom);
+    const up = nameFor(os, labels, npc.ch, show) === null ? 0 : lift;
+    drawBubble(ctx, text, offsetX + top.x * zoom, offsetY + (top.y - 1) * zoom - up, zoom);
   }
 
-  // The configured characters' names.
-  for (const person of os.aero.people) {
-    if (person.ch.matrixEffect || !os.aero.personOnFloor(person)) continue;
-    const top = spriteTop(person.ch);
-    drawName(ctx, person.name, offsetX + top.x * zoom, offsetY + (top.y - 1) * zoom, zoom);
+  // The name over every character: one line, `Ava \u00b7 Reviewer`.
+  const chars = new Map<number, Character>();
+  for (const c of os.characters.values()) chars.set(c.id, c);
+  for (const person of os.aero.people) chars.set(person.ch.id, person.ch);
+  for (const npc of os.aero.npcs) chars.set(npc.ch.id, npc.ch);
+  for (const label of labels.values()) {
+    const ch = chars.get(label.id);
+    if (!ch) continue;
+    const name = nameFor(os, labels, ch, show);
+    if (name === null) continue;
+    const top = spriteTop(ch);
+    drawName(ctx, name, offsetX + top.x * zoom, offsetY + (top.y - 1) * zoom, zoom);
   }
   ctx.restore();
 }
