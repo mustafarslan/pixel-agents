@@ -164,6 +164,13 @@ const DESK_ROLES = [
 export type DeskRole = (typeof DESK_ROLES)[number]['role'];
 const GREET_SHOW_SEC = 3;
 
+/** Contractors: hired when every person of a roster type on the floor is busy, they come out of a lift and leave by it. */
+const CONTRACTOR_CAP = 8;
+const CONTRACTOR_IDLE_SEC = 120;
+const CONTRACTOR_ID_BASE = PERSON_ID_BASE - 2_000_000;
+const LIFT_TYPE = 'AERO_ELEVATOR';
+const LIFT_WIDTH_FALLBACK = 2;
+
 /** The receptionist or the guard: seated at a held chair, never in `characters`, `people` or any seat pick. */
 export interface DeskNpc {
   role: DeskRole;
@@ -205,6 +212,17 @@ export interface Person {
   stranded: boolean;
   /** What the world looked like when no bench was found for it: no new search until that changes (see `benchSignature`). */
   noBench: string | null;
+  /** Set on a contractor, hired for a floor whose people of the type were all busy; absent on a person. */
+  contractor?: Contractor;
+}
+
+export interface Contractor {
+  /** The `#N` in its name, 2 and up. */
+  number: number;
+  /** Seconds without work (page ticks); 0 while it works. */
+  idle: number;
+  /** Walking to the lift to leave: still reusable until its despawn starts. */
+  leaving: boolean;
 }
 
 /** A subagent whose lead was off the floor on show when it started: matched when the lead's floor is shown. */
@@ -269,6 +287,8 @@ export class AeroOffice {
   private deskSeats: unknown = null;
   private deskChairs: Array<{ role: DeskRole; uid: string }> = [];
   private nextPersonSlot = 0;
+  /** The tiles in front of the lifts (the top row of each `AERO_ELEVATOR`, unblocked): where contractors arrive and leave. */
+  lobby: Tile[] = [];
 
   private readonly os: OfficeState;
 
@@ -310,6 +330,13 @@ export class AeroOffice {
       if (ch) this.stand(ch);
     }
     this.failed.clear();
+    const lift = os.layout.furniture.filter((f) => f.type === LIFT_TYPE);
+    this.lobby = lift
+      .flatMap((f) => {
+        const w = getCatalogEntry(f.type)?.footprintW ?? LIFT_WIDTH_FALLBACK;
+        return Array.from({ length: w }, (_, i) => ({ col: f.col + i, row: f.row }));
+      })
+      .filter((t) => !blocked.has(key(t.col, t.row)));
     // The seats are new: borrowed benches are let go, and taken again by the tick.
     for (const person of this.people) {
       if (person.bench !== null) {
@@ -803,6 +830,7 @@ export class AeroOffice {
   private homeOnFloor(person: Person): boolean {
     const update = getAeroUpdate();
     const floor = update?.floor;
+    if (person.contractor) return person.floor === (floor?.id ?? null);
     if (person.floor !== null) return !floor || floor.id === person.floor;
     if (person.room !== null) return this.roomOnFloor(person.room);
     return !update || ownerSlugsShown(update).has(person.slug);
@@ -949,6 +977,7 @@ export class AeroOffice {
     const wanted: ReadonlyMap<string, string> = update ? wantedOf(update) : new Map();
     const have = new Set<string>();
     for (const person of this.people) {
+      if (person.contractor) continue;
       const id = idOf(person.floor, person.room, person.slug);
       const name = wanted.get(id);
       if (name === undefined) {
@@ -1024,6 +1053,9 @@ export class AeroOffice {
     const effect = advanceMatrixEffect(ch, dt);
     if (effect !== 'none') {
       if (effect === 'despawned') this.people = this.people.filter((p) => p !== person);
+      // A contractor out of the lift is greeted at the front desk, when it is seen arriving.
+      else if (effect === 'spawned' && person.contractor && this.personOnFloor(person))
+        this.greetArrival();
       return;
     }
     const visible = this.personOnFloor(person);
@@ -1054,6 +1086,7 @@ export class AeroOffice {
         }
       }
     }
+    if (person.contractor && this.tendContractor(person, dt)) return;
     // Not on the floor on show: it stands where it is, unseen, and holds no bench.
     if (!this.personOnFloor(person)) {
       this.releaseBench(person, false);
@@ -1069,6 +1102,129 @@ export class AeroOffice {
       person.returning = false;
       if (this.personOnFloor(person)) this.poofAt(ch);
     }
+  }
+
+  // ── Contractors ──────────────────────────────────────────────────
+
+  /**
+   * A contractor's idle timer and departure, run before the off-floor return so the timer runs unseen too. Done for 120 s it walks to
+   * the lift and despawns there; with nobody looking it is removed at once. True when the contractor is gone (the step ends).
+   */
+  private tendContractor(person: Person, dt: number): boolean {
+    const ch = person.ch;
+    const c = person.contractor!;
+    if (person.subId !== null) {
+      c.idle = 0;
+      return false;
+    }
+    c.idle += dt;
+    if (!c.leaving && c.idle < CONTRACTOR_IDLE_SEC) return false;
+    if (!this.personOnFloor(person)) {
+      this.releaseBench(person, false);
+      this.people = this.people.filter((p) => p !== person);
+      return true;
+    }
+    if (!c.leaving) {
+      c.leaving = true;
+      person.returning = false;
+      const path = this.liftPath(ch);
+      if (path === null) {
+        this.despawnContractor(person);
+        return true;
+      }
+      ch.isActive = false;
+      ch.wanderTimer = 1e9;
+      if (path.length > 0) {
+        ch.path = path;
+        ch.moveProgress = 0;
+        ch.state = CharacterState.WALK;
+        ch.frame = 0;
+        ch.frameTimer = 0;
+      }
+    }
+    if (ch.state !== CharacterState.WALK) {
+      this.despawnContractor(person);
+      return true;
+    }
+    return false;
+  }
+
+  private despawnContractor(person: Person): void {
+    this.releaseBench(person, false);
+    person.ch.path = [];
+    person.ch.moveProgress = 0;
+    startMatrixEffect(person.ch, 'despawn');
+  }
+
+  /** The path to the nearest lobby tile that can be reached ([] when already on one), or null when there is none. */
+  private liftPath(ch: Character): Tile[] | null {
+    const byDistance = [...this.lobby].sort(
+      (a, b) =>
+        Math.abs(a.col - ch.tileCol) +
+        Math.abs(a.row - ch.tileRow) -
+        (Math.abs(b.col - ch.tileCol) + Math.abs(b.row - ch.tileRow)),
+    );
+    for (const t of byDistance) {
+      if (t.col === ch.tileCol && t.row === ch.tileRow) return [];
+      const path = this.pathTo(ch, t);
+      if (path.length > 0) return path;
+    }
+    return null;
+  }
+
+  /** A contractor of the floor for the type, out of a lift, when the floor has the type, a lift and room (never for a PR-run lead). */
+  private hire(lead: Character, type: string, floorId: string | null): Person | null {
+    if (floorId === null || this.lobby.length === 0 || lead.directoryName === PR_RUNS_ROOM)
+      return null;
+    const home = this.people.find(
+      (p) =>
+        !p.contractor && p.floor === floorId && p.slug === type && p.ch.matrixEffect !== 'despawn',
+    );
+    if (!home) return null;
+    const here = this.people.filter((p) => p.contractor && p.floor === floorId);
+    if (here.length >= CONTRACTOR_CAP) return null;
+    const taken = new Set(here.filter((p) => p.slug === type).map((p) => p.contractor!.number));
+    let number = 2;
+    while (taken.has(number)) number++;
+    const used = new Set(this.people.map((p) => p.ch.id));
+    let id = CONTRACTOR_ID_BASE;
+    while (used.has(id)) id--;
+    const occupied = this.occupied(Number.NaN);
+    const spot = this.lobby.find((t) => !occupied.has(key(t.col, t.row))) ?? this.lobby[0];
+    // A look bounded by (type, number): a palette that moves with both, a hue turn only past the palettes.
+    const palettes = Math.max(1, getLoadedCharacterCount());
+    let h = 0;
+    for (const c of type) h = (h * 31 + c.charCodeAt(0)) % 997;
+    const ch = createCharacter(
+      id,
+      (h + number) % palettes,
+      null,
+      null,
+      (Math.floor((number - 2) / palettes) % 6) * 60,
+    );
+    ch.isActive = false;
+    ch.state = CharacterState.IDLE;
+    ch.dir = Direction.DOWN;
+    ch.tileCol = spot.col;
+    ch.tileRow = spot.row;
+    this.stand(ch);
+    startMatrixEffect(ch, 'spawn');
+    const person: Person = {
+      slug: type,
+      floor: floorId,
+      room: null,
+      name: `${home.name} #${number}`,
+      ch,
+      subId: null,
+      returning: false,
+      bench: null,
+      sitting: false,
+      stranded: false,
+      noBench: null,
+      contractor: { number, idle: 0, leaving: false },
+    };
+    this.people.push(person);
+    return person;
   }
 
   // ── Benches ──────────────────────────────────────────────────────
@@ -1213,6 +1369,11 @@ export class AeroOffice {
     for (const person of this.people) {
       const ch = person.ch;
       if (person.subId !== null || ch.matrixEffect === 'despawn') continue;
+      // A contractor on its way out when the layout is rebuilt has nowhere it knew to go: it is gone.
+      if (person.contractor?.leaving) {
+        this.people = this.people.filter((p) => p !== person);
+        continue;
+      }
       if (onFloor.has(key(ch.tileCol, ch.tileRow))) continue;
       const spot = this.freeLoungeTile();
       if (!spot) continue;
@@ -1270,21 +1431,37 @@ export class AeroOffice {
    */
   private match(lead: Character, parentToolId: string, type: string): boolean {
     const floorId = getAeroUpdate()?.floor?.id ?? null;
+    const subId = this.os.getSubagentId(lead.id, parentToolId);
+    const sub = subId === null ? undefined : this.os.characters.get(subId);
+    if (subId === null || !sub) return false;
+    // Already matched (this runs on every subagent tool start): never a second person, never a second hire.
+    if (sub.aeroHidden || this.people.some((p) => p.subId === subId)) return true;
     // A person whose stand-in has ended but which the tick hasn't sent home yet is free too.
     const free = (p: Person): boolean =>
       p.slug === type &&
       p.ch.matrixEffect !== 'despawn' &&
       (p.subId === null || !this.os.subagentMeta.has(p.subId));
-    const person =
-      this.people.find((p) => free(p) && p.floor !== null && p.floor === floorId) ??
-      this.people.find((p) => free(p) && p.room !== null && p.room === lead.directoryName) ??
+    const own = (p: Person): boolean => !p.contractor && free(p);
+    let hired = false;
+    let person =
+      this.people.find((p) => own(p) && p.floor !== null && p.floor === floorId) ??
+      this.people.find((p) => own(p) && p.room !== null && p.room === lead.directoryName) ??
       this.people.find(
-        (p) => free(p) && p.floor === null && p.room === null && this.homeOnFloor(p),
-      );
+        (p) => own(p) && p.floor === null && p.room === null && this.homeOnFloor(p),
+      ) ??
+      this.people.find(
+        (p) => p.contractor !== undefined && free(p) && p.floor === floorId && p.slug === type,
+      ) ??
+      null;
+    if (!person) {
+      person = this.hire(lead, type, floorId);
+      hired = person !== null;
+    }
     if (!person) return false;
-    const subId = this.os.getSubagentId(lead.id, parentToolId);
-    const sub = subId === null ? undefined : this.os.characters.get(subId);
-    if (subId === null || !sub) return false;
+    if (person.contractor) {
+      person.contractor.leaving = false;
+      person.contractor.idle = 0;
+    }
     // Its last stand-in ended before the tick sent it home: it keeps the tile it stands on, and lets go of the bench.
     if (person.subId !== null) this.releaseBench(person, false);
     sub.aeroHidden = true;
@@ -1293,7 +1470,7 @@ export class AeroOffice {
     person.stranded = false;
     const ch = person.ch;
     // A stand-in for a subagent of another floor is hidden with it: no poof.
-    if (this.personOnFloor(person)) this.poofAt(ch);
+    if (!hired && this.personOnFloor(person)) this.poofAt(ch);
     ch.isActive = true;
     // A free bench at a PC of the lead's pod, else the free tile nearest its desk (the lead's seat, not wherever the lead stands now:
     // a lead resting in the Lounge is not where the work is).
@@ -1411,7 +1588,12 @@ export class AeroOffice {
         shown: this.personOnFloor(p),
         away: p.subId !== null,
         bench: p.bench,
+        kind: p.contractor ? ('contractor' as const) : ('person' as const),
+        number: p.contractor?.number ?? 0,
+        idle: Math.floor(p.contractor?.idle ?? 0),
+        leaving: p.contractor?.leaving ?? false,
       })),
+      lobby: this.lobby.map((t) => ({ ...t })),
       benches: [...this.borrowed.keys()],
       pcsOn: this.os.poweredFurniture(),
       leads: [...this.os.characters.values()]
@@ -1474,7 +1656,15 @@ export interface AeroSnapshot {
     away: boolean;
     /** The pod bench it works on, or null. */
     bench: string | null;
+    kind: 'person' | 'contractor';
+    /** A contractor's number (its name's `#N`), 0 for a person. */
+    number: number;
+    /** A contractor's whole seconds without work. */
+    idle: number;
+    leaving: boolean;
   }>;
+  /** The tiles in front of the lifts. */
+  lobby: Tile[];
   /** The pod benches people work on (borrowed, never assigned). */
   benches: string[];
   /** The uids of the furniture that is on because somebody sits at it (leads and people on benches). */

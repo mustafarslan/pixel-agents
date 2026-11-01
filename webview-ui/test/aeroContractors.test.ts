@@ -10,10 +10,18 @@ import assert from 'node:assert/strict';
 
 import { afterEach, test } from 'vitest';
 
-import { resetAeroUpdate, setAeroUpdate } from '../src/aero/office.js';
+import { PERSON_ID_BASE, resetAeroUpdate, setAeroUpdate } from '../src/aero/office.js';
+import { PR_RUNS_ROOM } from '../src/aero/update.js';
+import { AREA_LABEL_FALLBACK_COLOR } from '../src/constants.js';
 import { OfficeState } from '../src/office/engine/officeState.js';
+import { buildDynamicCatalog } from '../src/office/layout/furnitureCatalog.js';
 import type { OfficeLayout, PlacedFurniture, Seat } from '../src/office/types.js';
-import { Direction, TileType } from '../src/office/types.js';
+import {
+  CharacterState,
+  Direction,
+  MATRIX_EFFECT_DURATION,
+  TileType,
+} from '../src/office/types.js';
 
 afterEach(() => resetAeroUpdate());
 
@@ -206,4 +214,387 @@ test('no greeting on a restore, on a character of another floor, or on a floor s
   // A lead arriving on the floor on show now is greeted.
   os.addAgent(3, 0, 0, undefined, false, FB);
   assert.deepEqual(os.aero.snapshot().greetings, { receptionist: 1, guard: 1 });
+});
+
+test('a teammate (placed beside its lead) is not greeted: it appears by its lead, not at the entrance', () => {
+  const os = build();
+  os.addAgent(1, 0, 0, undefined, true);
+  os.addAgent(2, 0, 0, undefined, false, undefined, 1);
+  assert.deepEqual(os.aero.snapshot().greetings, { receptionist: 0, guard: 0 });
+  os.addAgent(3, 0, 0, undefined, false);
+  assert.deepEqual(os.aero.snapshot().greetings, { receptionist: 1, guard: 1 });
+});
+
+// ── Contractors ────────────────────────────────────────────────────
+//
+// Pod 1 in columns 1..8 (the lead's bench and two wooden benches, a PC below each), the Lounge in columns 16..21, and two lifts at
+// the bottom, columns 10..13 of row 8 in front of them; the turnstiles block (10,7) and (13,7), the gap is columns 11 and 12.
+
+const CROWS = 10;
+const L = 10;
+const LEAD_BENCH = 'p1-lead';
+const WOOD_A = 'p1-wood-a';
+const WOOD_B = 'p1-wood-b';
+const LOUNGE_SEAT = 'aero-0a1b2c3d-lounge-2';
+const FC = 'cccccccccccc';
+
+let catalogReady = false;
+function loadCatalog(): void {
+  if (catalogReady) return;
+  const sprite = (color: string) =>
+    Array.from({ length: 16 }, () => new Array<string>(16).fill(color));
+  const entry = (id: string, state: 'on' | 'off') => ({
+    id,
+    label: id,
+    category: 'electronics',
+    width: 16,
+    height: 16,
+    footprintW: 1,
+    footprintH: 1,
+    isDesk: false,
+    canPlaceOnWalls: false,
+    groupId: 'pc',
+    state,
+  });
+  assert.ok(
+    buildDynamicCatalog({
+      catalog: [entry('PC_OFF', 'off'), entry('PC_ON', 'on')],
+      sprites: { PC_OFF: sprite('#111111'), PC_ON: sprite('#22ff22') },
+    }),
+  );
+  catalogReady = true;
+}
+
+function buildFloor(lifts = true): OfficeState {
+  loadCatalog();
+  const furniture: PlacedFurniture[] = [
+    { uid: 'aero-0a1b2c3d-lounge-0', type: 'WHITEBOARD', col: 6 + L, row: 0 },
+    { uid: 'aero-0a1b2c3d-lounge-1', type: 'CLOCK', col: 8 + L, row: 0 },
+    { uid: LOUNGE_SEAT, type: 'SOFA_FRONT', col: 7 + L, row: 2 },
+    { uid: 'aero-0a1b2c3d-lounge-3', type: 'COFFEE_TABLE', col: 8 + L, row: 4 },
+    { uid: LEAD_BENCH, type: 'CUSHIONED_BENCH', col: 1, row: 3 },
+    { uid: 'pc-lead', type: 'PC_OFF', col: 1, row: 4 },
+    { uid: WOOD_A, type: 'WOODEN_BENCH', col: 4, row: 3 },
+    { uid: 'pc-a', type: 'PC_OFF', col: 4, row: 4 },
+    { uid: WOOD_B, type: 'WOODEN_BENCH', col: 7, row: 3 },
+    { uid: 'pc-b', type: 'PC_OFF', col: 7, row: 4 },
+    { uid: GUARD, type: 'CUSHIONED_CHAIR_FRONT', col: 3, row: 8 },
+    { uid: RECEPTION, type: 'CUSHIONED_CHAIR_FRONT', col: 5, row: 8 },
+    ...(lifts
+      ? [
+          { uid: 'lift-0', type: 'AERO_ELEVATOR', col: 10, row: 8 },
+          { uid: 'lift-1', type: 'AERO_ELEVATOR', col: 12, row: 8 },
+        ]
+      : []),
+  ];
+  const areaTiles: Array<string | null> = new Array(24 * CROWS).fill(null);
+  for (let r = 2; r <= 6; r++) {
+    for (let c = 1; c <= 8; c++) areaTiles[r * 24 + c] = 'Pod 1';
+    for (let c = 6 + L; c <= 11 + L; c++) areaTiles[r * 24 + c] = 'Lounge';
+  }
+  const tiles = new Array<TileType>(24 * CROWS).fill(TileType.FLOOR_1);
+  const wall = (c: number, r: number) => {
+    tiles[r * 24 + c] = TileType.WALL;
+  };
+  for (let c = 5 + L; c < 24; c++) for (const r of [0, 1]) wall(c, r);
+  for (let r = 2; r <= 7; r++) {
+    wall(12 + L, r);
+    wall(13 + L, r);
+    if (r !== 5) wall(5 + L, r);
+  }
+  for (let c = 6 + L; c <= 10 + L; c++) wall(c, 7);
+  const layout: OfficeLayout = {
+    version: 1,
+    cols: 24,
+    rows: CROWS,
+    tiles,
+    furniture,
+    areas: [
+      { label: 'Pod 1', color: AREA_LABEL_FALLBACK_COLOR },
+      { label: 'Lounge', color: AREA_LABEL_FALLBACK_COLOR },
+    ],
+    areaTiles,
+    pets: [],
+  };
+  const os = new OfficeState(layout);
+  os.seats = new Map([
+    [LEAD_BENCH, seat(LEAD_BENCH, 1, 3)],
+    [WOOD_A, seat(WOOD_A, 4, 3)],
+    [WOOD_B, seat(WOOD_B, 7, 3)],
+    [LOUNGE_SEAT, seat(LOUNGE_SEAT, 7 + L, 2)],
+    [GUARD, seat(GUARD, 3, 8)],
+    [RECEPTION, seat(RECEPTION, 5, 8)],
+  ]);
+  for (const col of [1, 4, 7, 3, 5])
+    os.blockedTiles.add(`${col},${col === 3 || col === 5 ? 8 : 3}`);
+  for (const k of ['10,7', '13,7', '10,9', '11,9', '12,9', '13,9', `${7 + L},2`, `${8 + L},4`]) {
+    os.blockedTiles.add(k);
+  }
+  os.walkableTiles = os.walkableTiles.filter((t) => !os.blockedTiles.has(`${t.col},${t.row}`));
+  return os;
+}
+
+const upd = (shown: string | null, agents: unknown[]): Record<string, unknown> => ({
+  lunch: false,
+  meeting: null,
+  inbox: 0,
+  lounge: true,
+  agents,
+  pods: { mappings: { [FA]: ['Pod 1'], [FB]: ['Pod 1'], [FC]: ['Pod 1'] }, labels: {} },
+  ...(shown === null
+    ? {}
+    : { floor: { id: shown, number: shown === FA ? 1 : 2, name: 'f', rooms: [shown] } }),
+});
+const staff = (floor: string, ...slugs: string[]) =>
+  slugs.map((s) => ({ name: s[0].toUpperCase() + s.slice(1), slug: s, floor }));
+
+function until(os: OfficeState, done: () => boolean, seconds = 60, what = 'condition'): void {
+  for (let t = 0; t < seconds; t += 0.1) {
+    if (done()) return;
+    os.update(0.1);
+  }
+  assert.ok(done(), `${what} within ${seconds}s`);
+}
+
+/** A floor A with a working lead and a reviewer, spawned. */
+function floorA(os = buildFloor(), agents: unknown[] = staff(FA, 'reviewer')): OfficeState {
+  os.addAgent(1, 0, 0, undefined, true, FA);
+  os.setAgentActive(1, true);
+  assert.ok(setAeroUpdate(upd(FA, agents)));
+  run(os, MATRIX_EFFECT_DURATION + 0.5);
+  return os;
+}
+let tool = 0;
+function start(os: OfficeState, slug = 'reviewer', parent = 1): { tool: string; ok: boolean } {
+  const t = `tool-${++tool}`;
+  os.addSubagent(parent, t);
+  return { tool: t, ok: os.aero.subagentStarted(parent, t, `Subtask: ${slug}`) };
+}
+const contractors = (os: OfficeState) =>
+  os.aero.snapshot().people.filter((p) => p.kind === 'contractor');
+const liftTiles = ['10,8', '11,8', '12,8', '13,8'];
+
+test('every person of the type busy: the next subagent hires a contractor out of a lift, named #2, to a bench in the lead’s pod', () => {
+  const os = floorA();
+  assert.deepEqual(
+    os.aero.snapshot().lobby.map((t) => `${t.col},${t.row}`),
+    liftTiles,
+  );
+  assert.equal(start(os).ok, true, 'the floor’s own reviewer');
+  assert.equal(contractors(os).length, 0);
+  const second = start(os);
+  assert.equal(second.ok, true, 'a contractor');
+  const [c] = contractors(os);
+  assert.equal(c.name, 'Reviewer #2');
+  assert.equal(c.number, 2);
+  assert.ok(liftTiles.includes(`${c.col},${c.row}`), 'out of a lift');
+  assert.ok(c.id <= PERSON_ID_BASE, 'a page-only id');
+  assert.equal(
+    os.aero.snapshot().greetings.receptionist,
+    0,
+    'greeted once it is out, not when hired',
+  );
+  run(os, MATRIX_EFFECT_DURATION + 0.5);
+  assert.deepEqual(os.aero.snapshot().greetings, { receptionist: 1, guard: 1 });
+  const p = os.aero.people.find((x) => x.contractor)!;
+  until(os, () => p.ch.state === CharacterState.TYPE, 60, 'the contractor sits');
+  const benches = os.aero
+    .snapshot()
+    .people.map((x) => x.bench)
+    .sort();
+  assert.deepEqual(benches, [WOOD_A, WOOD_B], 'both on benches of the lead’s pod');
+  assert.equal(os.seats.get(p.ch.seatId!)!.assigned, false, 'borrowed, never assigned');
+  assert.equal(os.characters.get(os.getSubagentId(1, second.tool)!)!.aeroHidden, true);
+});
+
+test('a duplicated subagentToolStart hires once: the second call is already matched', () => {
+  const os = floorA();
+  start(os);
+  const { tool: t } = start(os);
+  assert.equal(contractors(os).length, 1);
+  assert.equal(os.aero.subagentStarted(1, t, 'Subtask: reviewer'), true);
+  assert.equal(os.aero.subagentStarted(1, t, 'Subtask: reviewer'), true);
+  assert.equal(contractors(os).length, 1);
+  assert.equal(os.aero.people.length, 2);
+});
+
+test('contractors take the lowest free number, spawn on free lobby tiles, and are 8 at most on a floor', () => {
+  const os = floorA();
+  const tools: string[] = [];
+  start(os);
+  for (let i = 0; i < 3; i++) tools.push(start(os).tool);
+  assert.deepEqual(
+    contractors(os).map((c) => c.number),
+    [2, 3, 4],
+  );
+  const spawn = contractors(os).map((c) => `${c.col},${c.row}`);
+  assert.equal(new Set(spawn).size, 3, 'each on a free lobby tile');
+  assert.ok(spawn.every((k) => liftTiles.includes(k)));
+  // #3's work ends and it leaves; the next hire takes 3 again.
+  os.removeSubagent(1, tools[1]);
+  run(os, 130);
+  assert.deepEqual(
+    contractors(os).map((c) => c.number),
+    [2, 4],
+  );
+  start(os);
+  assert.deepEqual(
+    contractors(os)
+      .map((c) => c.number)
+      .sort(),
+    [2, 3, 4],
+  );
+  // Up to 8 on the floor; the next subagent stays stock.
+  for (let i = 0; i < 5; i++) assert.equal(start(os).ok, true);
+  assert.equal(contractors(os).length, 8);
+  const extra = start(os);
+  assert.equal(extra.ok, false);
+  assert.equal(os.characters.get(os.getSubagentId(1, extra.tool)!)!.aeroHidden, undefined);
+  assert.equal(contractors(os).length, 8);
+  assert.equal(new Set(os.aero.people.map((p) => p.ch.id)).size, os.aero.people.length);
+});
+
+test('a contractor done waits in the Lounge, is reused within 120 s of ticks, and otherwise walks to the lift and despawns', () => {
+  const os = floorA();
+  start(os);
+  const a = start(os);
+  const id = contractors(os)[0].id;
+  run(os, 8);
+  os.removeSubagent(1, a.tool);
+  until(
+    os,
+    () => contractors(os)[0].col >= 16 && contractors(os)[0].state !== CharacterState.WALK,
+    30,
+    'in the Lounge',
+  );
+  // Reused after a minute: same character, same name, no #3.
+  run(os, 60);
+  assert.ok(contractors(os)[0].idle >= 55);
+  const again = start(os);
+  assert.equal(again.ok, true);
+  assert.deepEqual(
+    contractors(os).map((c) => [c.id, c.name, c.idle]),
+    [[id, 'Reviewer #2', 0]],
+  );
+  run(os, 8);
+  // Done again: 119 s still waits, then it walks out.
+  os.removeSubagent(1, again.tool);
+  run(os, 3);
+  run(os, 116);
+  assert.equal(contractors(os)[0].leaving, false, '119 s of ticks');
+  until(os, () => contractors(os).length === 0 || contractors(os)[0].leaving, 10, 'it starts out');
+  // Reusable until the despawn starts: a start now takes it back.
+  const back = start(os);
+  assert.equal(back.ok, true);
+  assert.deepEqual(
+    contractors(os).map((c) => [c.id, c.leaving]),
+    [[id, false]],
+  );
+  run(os, 8);
+  os.removeSubagent(1, back.tool);
+  // Gone for good: it walks to the lift lobby and despawns there.
+  let last = contractors(os)[0];
+  for (let t = 0; t < 200 && contractors(os).length > 0; t += 0.1) {
+    os.update(0.1);
+    if (contractors(os).length > 0) last = contractors(os)[0];
+  }
+  assert.equal(contractors(os).length, 0, 'despawned');
+  assert.equal(last.leaving, true);
+  assert.ok(
+    liftTiles.includes(`${last.col},${last.row}`),
+    `at the lift, not ${last.col},${last.row}`,
+  );
+});
+
+test('a contractor expiring off the floor is removed at once, with no walk', () => {
+  const os = floorA();
+  start(os);
+  const a = start(os);
+  run(os, 8);
+  os.removeSubagent(1, a.tool);
+  run(os, 2);
+  assert.ok(setAeroUpdate(upd(FB, staff(FA, 'reviewer'))));
+  run(os, 1);
+  assert.equal(contractors(os)[0].shown, false);
+  run(os, 123);
+  assert.equal(contractors(os).length, 0);
+  assert.equal(os.aero.people.length, 1, 'the floor’s own reviewer stays');
+});
+
+test('no contractor for a PR-run lead, without a lift, or without a floor on show', () => {
+  // A PR-run lead: a free person still stands in, past that the subagent is stock.
+  const os = floorA();
+  os.addAgent(2, 0, 0, undefined, true, PR_RUNS_ROOM);
+  start(os);
+  assert.equal(start(os, 'reviewer', 2).ok, false);
+  assert.equal(contractors(os).length, 0);
+  assert.equal(start(os).ok, true, 'a lead of the floor in the same state does get one');
+  assert.equal(contractors(os).length, 1);
+  // No lift in the layout.
+  const bare = floorA(buildFloor(false));
+  start(bare);
+  assert.equal(start(bare).ok, false);
+  assert.deepEqual(bare.aero.snapshot().lobby, []);
+  assert.equal(contractors(bare).length, 0);
+  // The Rooms style: no floor on show.
+  const rooms = buildFloor();
+  rooms.addAgent(1, 0, 0, undefined, true, FA);
+  rooms.setAgentActive(1, true);
+  assert.ok(setAeroUpdate(upd(null, [{ name: 'Reviewer', slug: 'reviewer', room: FA }])));
+  run(rooms, 1);
+  start(rooms);
+  assert.equal(start(rooms).ok, false);
+  assert.equal(contractors(rooms).length, 0);
+});
+
+test('an update does not despawn contractors: reconcile leaves them to their own timer', () => {
+  const os = floorA();
+  start(os);
+  start(os);
+  run(os, 3);
+  assert.ok(setAeroUpdate(upd(FA, staff(FA, 'reviewer'))));
+  run(os, 3);
+  const c = os.aero.people.find((p) => p.contractor)!;
+  assert.equal(c.ch.matrixEffect, null);
+  assert.equal(c.subId !== null, true);
+  // Even an update that no longer lists the type keeps a contractor at work.
+  assert.ok(setAeroUpdate(upd(FA, staff(FA, 'planner'))));
+  run(os, 3);
+  assert.equal(contractors(os).length, 1);
+  assert.equal(os.aero.people.find((p) => p.contractor)!.ch.matrixEffect, null);
+});
+
+test('the floor switching while a contractor walks in freezes it, and it gets a bench on return', () => {
+  const os = floorA();
+  start(os);
+  start(os);
+  run(os, MATRIX_EFFECT_DURATION + 0.5);
+  const before = contractors(os)[0];
+  assert.equal(before.state, CharacterState.WALK);
+  assert.ok(setAeroUpdate(upd(FB, staff(FA, 'reviewer'))));
+  run(os, 0.3);
+  const away = contractors(os)[0];
+  assert.equal(away.shown, false);
+  run(os, 5);
+  const frozen = contractors(os)[0];
+  assert.deepEqual([frozen.col, frozen.row], [away.col, away.row]);
+  assert.equal(frozen.bench, null, 'its bench is let go while its floor is off');
+  assert.ok(setAeroUpdate(upd(FA, staff(FA, 'reviewer'))));
+  const p = os.aero.people.find((x) => x.contractor)!;
+  until(os, () => p.ch.state === CharacterState.TYPE, 60, 'back at a bench');
+  assert.ok([WOOD_A, WOOD_B].includes(p.ch.seatId!));
+  assert.equal(contractors(os).length, 1);
+});
+
+test('a layout rebuild takes away a contractor on its way out', () => {
+  const os = floorA();
+  start(os);
+  const a = start(os);
+  run(os, 8);
+  os.removeSubagent(1, a.tool);
+  until(os, () => contractors(os)[0]?.leaving === true, 150, 'it leaves');
+  os.seats = new Map(os.seats);
+  os.update(0.1);
+  os.update(0.1);
+  assert.equal(contractors(os).length, 0);
 });

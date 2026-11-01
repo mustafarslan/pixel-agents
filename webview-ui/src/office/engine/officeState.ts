@@ -856,8 +856,10 @@ export class OfficeState {
     this.characters.set(id, ch);
     // Aero: a character of another floor holds no seat; the sync lets go of the one it was just given.
     this.aero.syncMappings();
-    // Aero: a real arrival on the floor on show (a spawn effect; a restore passes none) is greeted at the front desk.
-    if (!skipSpawnEffect && !this.aero.isOffFloor(id)) this.aero.greetArrival();
+    // Aero: a real arrival on the floor on show (a spawn effect; a restore passes none) is greeted at the front desk. A teammate
+    // appears beside its lead, not at the entrance.
+    if (!skipSpawnEffect && nearAgentId === undefined && !this.aero.isOffFloor(id))
+      this.aero.greetArrival();
   }
 
   // ── Greeter ───────────────────────────────────────────────────
