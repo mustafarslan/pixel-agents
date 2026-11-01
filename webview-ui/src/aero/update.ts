@@ -31,7 +31,7 @@
  *   character whose directory name is not in `rooms` (and its subagents and teammates) is not on this floor: hidden, with no seat.
  * - `agents`: a project agent has the `floor` (the repo's floor id) it is staff of, or, with no floor (Rooms style, no repo),
  *   the `room` of its worktree; never both. The owner's have neither: one shared set, on the floor on show unless its roster
- *   has the type. At most 16 a floor, 16 for the rooms, 16 of the owner's, 272 in all; a slug once per floor, room or owner.
+ *   has the type. At most 16 a floor, 16 of the owner's, 272 in all; with no `floor` in the update, 16 in all (rooms', then the owner's); a slug once per floor, room or owner.
  * - Strings have no control, format or line-separator characters. Keys are exactly these; nothing else is accepted.
  */
 
@@ -291,6 +291,8 @@ export function parseAeroUpdate(raw: unknown): AeroUpdate | null {
     );
   }
   if (perFloor.size > MAX_FLOORS) return null;
+  // With no floor on show (the Rooms style, no repo) the staff are at most 16 in all: the rooms' first, then the owner's.
+  if (floor === null && parsedAgents.length > MAX_AGENTS_PER_FLOOR) return null;
 
   const update: AeroUpdate = {
     lunch,

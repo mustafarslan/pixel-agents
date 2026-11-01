@@ -430,6 +430,8 @@ test('a configured character of a room on another floor is hidden; the owner age
       returning: false,
       bench: null,
       sitting: false,
+      stranded: false,
+      noBench: null,
     });
   });
   const ids = () => os.aero.characters([]).map((c) => c.id);

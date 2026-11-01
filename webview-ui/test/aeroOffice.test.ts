@@ -788,6 +788,7 @@ test('a SubagentStart of a lead on another floor is queued with nobody assigned;
   os.update(0.1);
   assert.equal(person.subId, subId);
   assert.equal(sub.aeroHidden, true);
+  assert.equal(os.aero.snapshot().people[0].away, true);
   assert.equal(os.aero.characters([]).includes(person.ch), true);
   // The floor off again: the stand-in is hidden with its subagent, no poof for nobody.
   const fx = os.aero.fx.started.poof ?? 0;

@@ -82,15 +82,18 @@ function floorRooms(floor: AeroFloor): ReadonlySet<string> {
 const ownerShown = new WeakMap<AeroUpdate, ReadonlySet<string>>();
 
 /**
- * The slugs of the owner's agents drawn on the floor on show: the floor's roster has 16 at most, its own types first, then the
- * owner's types it lacks, in the order given, until 16. Built once per update (an update makes a new object); only for an update
- * with a floor.
+ * The slugs of the owner's agents drawn on the floor on show: the roster has 16 at most, its own types first (the floor's, or with no
+ * floor the rooms'), then the owner's types it lacks, in the order given, until 16. Built once per update (an update makes a new
+ * object).
  */
-function ownerSlugsShown(update: AeroUpdate, floor: AeroFloor): ReadonlySet<string> {
+function ownerSlugsShown(update: AeroUpdate): ReadonlySet<string> {
   let set = ownerShown.get(update);
   if (!set) {
+    const floorId = update.floor?.id;
     const own = new Set<string>();
-    for (const a of update.agents) if (a.floor === floor.id) own.add(a.slug);
+    for (const a of update.agents) {
+      if (floorId !== undefined ? a.floor === floorId : a.room !== undefined) own.add(a.slug);
+    }
     const shown = new Set<string>();
     for (const a of update.agents) {
       if (a.floor !== undefined || a.room !== undefined || own.has(a.slug)) continue;
@@ -102,6 +105,21 @@ function ownerSlugsShown(update: AeroUpdate, floor: AeroFloor): ReadonlySet<stri
   }
   return set;
 }
+
+const wantedPeople = new WeakMap<AeroUpdate, ReadonlyMap<string, string>>();
+
+/** The people an update wants, by `floor/room/slug`, to their names. Built once per update. */
+function wantedOf(update: AeroUpdate): ReadonlyMap<string, string> {
+  let map = wantedPeople.get(update);
+  if (!map) {
+    map = new Map(update.agents.map((a) => [personId(a.floor ?? null, a.room ?? null, a.slug), a.name]));
+    wantedPeople.set(update, map);
+  }
+  return map;
+}
+
+const personId = (floor: string | null, room: string | null, slug: string): string =>
+  `${floor ?? ''}/${room ?? ''}/${slug}`;
 
 /** @internal for tests */
 export function resetAeroUpdate(): void {
@@ -150,6 +168,10 @@ export interface Person {
   bench: string | null;
   /** Whether it was sitting on that bench at the last look (the PC it faces follows). */
   sitting: boolean;
+  /** Its bench was let go without it getting up (its floor left, or the layout was rebuilt): it stands up when it is next looked after. */
+  stranded: boolean;
+  /** What the world looked like when no bench was found for it: no new search until that changes (see `benchSignature`). */
+  noBench: string | null;
 }
 
 /** A subagent whose lead was off the floor on show when it started: matched when the lead's floor is shown. */
@@ -253,9 +275,11 @@ export class AeroOffice {
         person.ch.seatId = null;
         person.bench = null;
         person.sitting = false;
+        person.stranded = true;
       }
     }
     this.borrowed.clear();
+    this.os.refreshFurniture();
     this.rehomePeople();
   }
 
@@ -668,18 +692,13 @@ export class AeroOffice {
     return this.homeOnFloor(person);
   }
 
-  /** The configured characters whose names are drawn: on the floor on show (by `personOnFloor`) and not materializing. */
-  namedPeople(): Person[] {
-    return this.people.filter((p) => !p.ch.matrixEffect && this.personOnFloor(p));
-  }
-
   /** Whether a configured character at home would be on the floor on show. */
   private homeOnFloor(person: Person): boolean {
     const update = getAeroUpdate();
     const floor = update?.floor;
     if (person.floor !== null) return !floor || floor.id === person.floor;
     if (person.room !== null) return this.roomOnFloor(person.room);
-    return !update || !floor || ownerSlugsShown(update, floor).has(person.slug);
+    return !update || ownerSlugsShown(update).has(person.slug);
   }
 
   /**
@@ -818,12 +837,8 @@ export class AeroOffice {
   }
 
   private reconcilePeople(update: AeroUpdate | null): void {
-    const idOf = (floor: string | null, room: string | null, slug: string): string =>
-      `${floor ?? ''}/${room ?? ''}/${slug}`;
-    const wanted = new Map<string, string>();
-    if (update) {
-      for (const a of update.agents) wanted.set(idOf(a.floor ?? null, a.room ?? null, a.slug), a.name);
-    }
+    const idOf = personId;
+    const wanted: ReadonlyMap<string, string> = update ? wantedOf(update) : new Map();
     const have = new Set<string>();
     for (const person of this.people) {
       const id = idOf(person.floor, person.room, person.slug);
@@ -875,6 +890,8 @@ export class AeroOffice {
         returning: false,
         bench: null,
         sitting: false,
+        stranded: false,
+        noBench: null,
       });
     }
   }
@@ -966,31 +983,36 @@ export class AeroOffice {
     this.os.refreshFurniture();
   }
 
-  /** Lets go of the person's bench. `standUp`: it gets up and takes the nearest free tile; else it stays where it is. */
+  /** Lets go of the person's bench. `standUp`: it gets up and takes the nearest free tile; else it stays where it is (`stranded`). */
   private releaseBench(person: Person, standUp: boolean): void {
     if (person.bench === null) return;
-    const ch = person.ch;
     this.borrowed.delete(person.bench);
     person.bench = null;
-    ch.seatId = null;
+    person.ch.seatId = null;
     const wasSitting = person.sitting;
     person.sitting = false;
-    if (standUp) {
-      const spot = this.nearestFreeTile(ch);
-      ch.state = CharacterState.IDLE;
-      ch.frame = 0;
-      ch.frameTimer = 0;
-      ch.path = [];
-      ch.moveProgress = 0;
-      if (spot) {
-        const path = this.pathTo(ch, spot);
-        if (path.length > 0) {
-          ch.path = path;
-          ch.state = CharacterState.WALK;
-        }
+    if (standUp) this.standAside(person);
+    else person.stranded = true;
+    if (wasSitting) this.os.refreshFurniture();
+  }
+
+  /** The person gets up where it is and walks to the nearest free tile (or just stands when there is none it can reach). */
+  private standAside(person: Person): void {
+    const ch = person.ch;
+    person.stranded = false;
+    const spot = this.nearestFreeTile(ch);
+    ch.state = CharacterState.IDLE;
+    ch.frame = 0;
+    ch.frameTimer = 0;
+    ch.path = [];
+    ch.moveProgress = 0;
+    if (spot) {
+      const path = this.pathTo(ch, spot);
+      if (path.length > 0) {
+        ch.path = path;
+        ch.state = CharacterState.WALK;
       }
     }
-    if (wasSitting) this.os.refreshFurniture();
   }
 
   /** Keeps a working person's bench honest: gone when somebody was seated on it or the lead's pod changed, taken when one is free. */
@@ -998,7 +1020,11 @@ export class AeroOffice {
     const os = this.os;
     const meta = person.subId === null ? undefined : os.subagentMeta.get(person.subId);
     const lead = meta ? os.characters.get(meta.parentAgentId) : undefined;
-    if (!lead || !lead.seatId) return;
+    if (!lead || !lead.seatId) {
+      // Nothing to sit beside: a person that lost its bench still gets up.
+      if (person.bench === null && person.stranded) this.standAside(person);
+      return;
+    }
     if (person.bench !== null) {
       const seat = os.seats.get(person.bench);
       const zone = os.seatZone(lead.seatId);
@@ -1006,13 +1032,30 @@ export class AeroOffice {
         this.releaseBench(person, true);
       }
     }
-    if (person.bench === null) this.takeBench(person, lead.seatId);
+    if (person.bench === null) {
+      if (this.takeBench(person, lead.seatId)) person.stranded = false;
+      // No bench for a person that was sitting on one it no longer holds: it may not stay on a tile it doesn't own.
+      else if (person.stranded) this.standAside(person);
+    }
+  }
+
+  /** What decides whether a bench search can find something new: the seats taken, the benches borrowed, the routes, the lead's seat. */
+  private benchSignature(leadSeatId: string): string {
+    let h = this.borrowed.size;
+    let i = 0;
+    for (const seat of this.os.seats.values()) {
+      i++;
+      if (seat.assigned) h = (h * 31 + i) | 0;
+    }
+    return `${leadSeatId}|${h}|${this.occupancy}|${this.os.seats.size}`;
   }
 
   /** Walks the person to the nearest free wooden bench of the lead's pod facing a PC; false when there is none it can reach. */
   private takeBench(person: Person, leadSeatId: string): boolean {
     const os = this.os;
     const ch = person.ch;
+    const signature = this.benchSignature(leadSeatId);
+    if (person.noBench === signature) return false;
     for (const uid of os.benchSeatsFor(leadSeatId, this.borrowed)) {
       const seat = os.seats.get(uid);
       if (!seat) continue;
@@ -1034,8 +1077,10 @@ export class AeroOffice {
         ch.frame = 0;
         ch.frameTimer = 0;
       }
+      person.noBench = null;
       return true;
     }
+    person.noBench = signature;
     return false;
   }
 
@@ -1080,12 +1125,18 @@ export class AeroOffice {
     if (type === null) return false;
     const lead = this.os.characters.get(parentId);
     if (!lead) return false;
-    if (!this.onFloor(lead)) {
+    // Not yet matchable: its lead's floor is off, or the first update (and with it the people) hasn't come.
+    if (!this.onFloor(lead) || !this.peopleReady()) {
       if (this.queued.length >= MAX_QUEUED) this.queued.shift();
       this.queued.push({ parentId, toolId: parentToolId, type });
       return false;
     }
     return this.match(lead, parentToolId, type);
+  }
+
+  /** Whether the update has come and its people are made (a subagent that starts before is queued). */
+  private peopleReady(): boolean {
+    return getAeroUpdate() !== null && this.people.length > 0;
   }
 
   /** Matches the queued subagents whose lead's floor is shown now; drops those that ended or whose lead left. */
@@ -1097,7 +1148,7 @@ export class AeroOffice {
       const subId = this.os.getSubagentId(q.parentId, q.toolId);
       const sub = subId === null ? undefined : this.os.characters.get(subId);
       if (!lead || !sub || sub.matrixEffect === 'despawn' || lead.matrixEffect === 'despawn') continue;
-      if (this.onFloor(lead)) this.match(lead, q.toolId, q.type);
+      if (this.onFloor(lead) && this.peopleReady()) this.match(lead, q.toolId, q.type);
       else keep.push(q);
     }
     this.queued = keep;
@@ -1110,8 +1161,11 @@ export class AeroOffice {
    */
   private match(lead: Character, parentToolId: string, type: string): boolean {
     const floorId = getAeroUpdate()?.floor?.id ?? null;
+    // A person whose stand-in has ended but which the tick hasn't sent home yet is free too.
     const free = (p: Person): boolean =>
-      p.slug === type && p.ch.matrixEffect !== 'despawn' && p.subId === null;
+      p.slug === type &&
+      p.ch.matrixEffect !== 'despawn' &&
+      (p.subId === null || !this.os.subagentMeta.has(p.subId));
     const person =
       this.people.find((p) => free(p) && p.floor !== null && p.floor === floorId) ??
       this.people.find((p) => free(p) && p.room !== null && p.room === lead.directoryName) ??
@@ -1120,9 +1174,12 @@ export class AeroOffice {
     const subId = this.os.getSubagentId(lead.id, parentToolId);
     const sub = subId === null ? undefined : this.os.characters.get(subId);
     if (subId === null || !sub) return false;
+    // Its last stand-in ended before the tick sent it home: it keeps the tile it stands on, and lets go of the bench.
+    if (person.subId !== null) this.releaseBench(person, false);
     sub.aeroHidden = true;
     person.subId = subId;
     person.returning = false;
+    person.stranded = false;
     const ch = person.ch;
     // A stand-in for a subagent of another floor is hidden with it: no poof.
     if (this.personOnFloor(person)) this.poofAt(ch);
@@ -1237,6 +1294,7 @@ export class AeroOffice {
         col: p.ch.tileCol,
         row: p.ch.tileRow,
         state: p.ch.state,
+        shown: this.personOnFloor(p),
         away: p.subId !== null,
         bench: p.bench,
       })),
@@ -1287,6 +1345,8 @@ export interface AeroSnapshot {
     col: number;
     row: number;
     state: string;
+    /** Drawn: on the floor on show (`personOnFloor`). */
+    shown: boolean;
     away: boolean;
     /** The pod bench it works on, or null. */
     bench: string | null;

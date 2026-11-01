@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import { afterEach, test } from 'vitest';
 
 import { PERSON_ID_BASE, resetAeroUpdate, setAeroUpdate } from '../src/aero/office.js';
+import { drawAeroOverlay } from '../src/aero/overlay.js';
 import {
   MAX_AGENT_ROOMS,
   MAX_AGENTS,
@@ -87,6 +88,7 @@ test('the caps: 16 a floor, 16 floors, the owner’s 16 once, 272 in all; one mo
   const full = {
     ...base(),
     agents: [...floors.flatMap((f) => onFloor(f, 16)), ...owner(16)],
+    floor: { id: floors[0], number: 1, name: 'f', rooms: [floors[0]] },
   };
   assert.equal(full.agents.length, 272);
   assert.notEqual(parseAeroUpdate(full), null, 'every list full');
@@ -103,12 +105,14 @@ test('the caps: 16 a floor, 16 floors, the owner’s 16 once, 272 in all; one mo
     parseAeroUpdate({ ...base(), agents: [...full.agents, agent('extra', { room: FA })] }),
     null,
   );
-  // Agents of the rooms (no floors) are at most 16 in all.
+  // With no floor on show (the Rooms style) the staff are at most 16 in all: the rooms' agents and the owner's together.
   const rooms = (n: number) =>
     Array.from({ length: n }, (_, i) => agent(`r${i}`, { room: floors[i % 4] }));
   assert.equal(MAX_AGENT_ROOMS, 16);
   assert.notEqual(parseAeroUpdate({ ...base(), agents: rooms(16) }), null);
   assert.equal(parseAeroUpdate({ ...base(), agents: rooms(17) }), null);
+  assert.notEqual(parseAeroUpdate({ ...base(), agents: [...rooms(8), ...owner(8)] }), null);
+  assert.equal(parseAeroUpdate({ ...base(), agents: [...rooms(9), ...owner(8)] }), null, '17 in all');
 });
 
 test('the fullest update, as Aero builds it, fits the host’s 64 KB', () => {
@@ -604,9 +608,25 @@ test('a person off the floor does not move; its stand-in ending there puts it on
   assert.ok(p.ch.tileCol >= 6 + L, 'still in the Lounge when the floor is back');
 });
 
-// ── The overlay: it draws the names of `namedPeople()` ─────────────
+// ── The overlay ────────────────────────────────────────────────────
 
-const drawnTexts = (os: OfficeState): string[] => os.aero.namedPeople().map((p) => p.name);
+/** What `drawAeroOverlay` writes with `fillText` on a stub context (the names and the other texts of the frame). */
+function drawnTexts(os: OfficeState): string[] {
+  const texts: string[] = [];
+  const ctx = new Proxy(
+    {},
+    {
+      get(_target, prop) {
+        if (prop === 'fillText') return (text: string) => texts.push(text);
+        if (prop === 'measureText') return () => ({ width: 8 });
+        return () => undefined;
+      },
+      set: () => true,
+    },
+  ) as unknown as CanvasRenderingContext2D;
+  drawAeroOverlay(ctx, os, 0, 0, 2);
+  return texts;
+}
 
 test('names are drawn for the people on the floor on show only, by personOnFloor (an owner person on another floor, too)', () => {
   const os = build();
@@ -628,4 +648,139 @@ test('names are drawn for the people on the floor on show only, by personOnFloor
   assert.ok(setAeroUpdate(upd(FA, agents)));
   run(os, 0.2);
   assert.ok(!drawnTexts(os).includes('Explorer'), 'standing in on floor B: no name on floor A');
+});
+
+// ── Fix round ──────────────────────────────────────────────────────
+
+test('with no floor (the Rooms style) the owner’s person is hidden where a room agent has the type, 16 in all', () => {
+  const os = build();
+  const agents = [
+    agent('reviewer', { room: FA, name: 'Reviewer' }),
+    ...shared('reviewer', 'explorer'),
+  ];
+  assert.ok(setAeroUpdate(upd(null, agents)));
+  spawned(os);
+  assert.equal(os.aero.people.length, 3);
+  const owners = os.aero.people.filter((p) => p.floor === null && p.room === null);
+  assert.deepEqual(
+    owners.map((p) => [p.slug, os.aero.personOnFloor(p)]),
+    [
+      ['reviewer', false],
+      ['explorer', true],
+    ],
+  );
+  // 10 room agents leave six places for the owner’s.
+  const many = build();
+  const rooms = Array.from({ length: 10 }, (_, i) => agent(`r${i}`, { room: FA, name: `R${i}` }));
+  const mine = Array.from({ length: 6 }, (_, i) => agent(`m${i}`, { name: `M${i}` }));
+  assert.ok(setAeroUpdate(upd(null, [...rooms, ...mine])));
+  spawned(many);
+  assert.equal(many.aero.people.filter((p) => many.aero.personOnFloor(p)).length, 16);
+});
+
+test('the snapshot says which people are shown', () => {
+  const os = build();
+  assert.ok(setAeroUpdate(upd(FA, [...staff(FA, 'reviewer'), ...staff(FB, 'planner'), ...shared('explorer')])));
+  spawned(os);
+  const shownOf = () => Object.fromEntries(os.aero.snapshot().people.map((p) => [p.slug, p.shown]));
+  assert.deepEqual(shownOf(), { reviewer: true, planner: false, explorer: true });
+  assert.ok(setAeroUpdate(upd(FB, [...staff(FA, 'reviewer'), ...staff(FB, 'planner'), ...shared('explorer')])));
+  os.update(0.1);
+  assert.deepEqual(shownOf(), { reviewer: false, planner: true, explorer: true });
+});
+
+test('a person whose bench was let go with its floor stands up on return when no bench is free, and stays off a tile it does not own', () => {
+  const os = build([[WOOD_A, 4]]);
+  lead(os, 1, FA);
+  const agents = staff(FA, 'reviewer');
+  assert.ok(setAeroUpdate(upd(FA, agents)));
+  spawned(os);
+  startReviewer(os);
+  const p = person(os, 'reviewer', FA);
+  until(os, () => p.ch.state === CharacterState.TYPE, 60, 'sits');
+  assert.equal(p.ch.seatId, WOOD_A);
+  assert.ok(setAeroUpdate(upd(FB, agents)));
+  run(os, 0.2);
+  assert.equal(p.bench, null);
+  // While the floor is off somebody is seated on the bench.
+  os.seats.get(WOOD_A)!.assigned = true;
+  assert.ok(setAeroUpdate(upd(FA, agents)));
+  run(os, 3);
+  assert.equal(p.bench, null);
+  assert.equal(p.ch.seatId, null);
+  assert.notEqual(`${p.ch.tileCol},${p.ch.tileRow}`, '4,3', 'off the bench tile');
+  assert.ok(!os.aero.snapshot().pcsOn.includes(PC_A), 'its PC is off');
+});
+
+test('a layout rebuild lets the benches go: the people get up and their PCs go off', () => {
+  const os = build();
+  lead(os, 1, FA);
+  assert.ok(setAeroUpdate(upd(FA, staff(FA, 'reviewer'))));
+  spawned(os);
+  startReviewer(os);
+  const p = person(os, 'reviewer', FA);
+  until(os, () => p.ch.state === CharacterState.TYPE, 60, 'sits');
+  const bench = p.ch.seatId!;
+  const benchSeat = os.seats.get(bench)!;
+  const spot = `${benchSeat.seatCol},${benchSeat.seatRow}`;
+  assert.ok(os.aero.snapshot().pcsOn.includes(bench === WOOD_A ? PC_A : PC_B));
+  os.rebuildFromLayout(os.layout);
+  os.update(0.1);
+  assert.equal(p.bench, null);
+  assert.deepEqual(os.aero.snapshot().benches, []);
+  assert.ok(!os.aero.snapshot().pcsOn.includes(bench === WOOD_A ? PC_A : PC_B), 'refreshed at once');
+  run(os, 3);
+  assert.notEqual(`${p.ch.tileCol},${p.ch.tileRow}`, spot, 'not left sitting on the old bench tile');
+});
+
+test('a person whose stand-in ended before the tick takes the next subagent of its type', () => {
+  const os = build();
+  lead(os, 1, FA);
+  assert.ok(setAeroUpdate(upd(FA, staff(FA, 'reviewer'))));
+  spawned(os);
+  startReviewer(os, 't1');
+  const p = person(os, 'reviewer', FA);
+  until(os, () => p.ch.state === CharacterState.TYPE, 60, 'sits');
+  os.removeSubagent(1, 't1');
+  const second = os.addSubagent(1, 't2');
+  assert.equal(os.aero.subagentStarted(1, 't2', 'Subtask: reviewer'), true, 'no tick between');
+  assert.equal(p.subId, second);
+  assert.equal(os.characters.get(second)!.aeroHidden, true);
+  run(os, 2);
+  assert.equal(p.subId, second, 'it stays away for the second');
+  assert.ok(p.bench !== null, 'on a bench again');
+});
+
+test('a subagent that starts before the first update is queued and matched once the people are made', () => {
+  const os = build();
+  lead(os, 1, FA);
+  const subId = os.addSubagent(1, 't1');
+  assert.equal(os.aero.subagentStarted(1, 't1', 'Subtask: reviewer'), false, 'nobody yet');
+  assert.ok(setAeroUpdate(upd(FA, staff(FA, 'reviewer'))));
+  run(os, 0.5);
+  assert.equal(person(os, 'reviewer', FA).subId, subId);
+  assert.equal(os.characters.get(subId)!.aeroHidden, true);
+});
+
+test('a working person with no bench does not search again every tick, and takes one that is freed later', () => {
+  const os = build([[WOOD_A, 4]]);
+  lead(os, 1, FA);
+  assert.ok(setAeroUpdate(upd(FA, staff(FA, 'reviewer'))));
+  spawned(os);
+  os.seats.get(WOOD_A)!.assigned = true;
+  startReviewer(os);
+  const p = person(os, 'reviewer', FA);
+  assert.equal(p.bench, null);
+  let searches = 0;
+  const original = os.benchSeatsFor.bind(os);
+  os.benchSeatsFor = (...args: Parameters<typeof original>) => {
+    searches++;
+    return original(...args);
+  };
+  run(os, 5);
+  assert.equal(searches, 0, 'no new search while nothing changed');
+  os.seats.get(WOOD_A)!.assigned = false;
+  run(os, 0.3);
+  assert.ok(searches >= 1);
+  assert.equal(p.bench, WOOD_A, 'the freed bench is taken');
 });
