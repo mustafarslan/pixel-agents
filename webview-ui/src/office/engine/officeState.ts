@@ -592,6 +592,47 @@ export class OfficeState {
   }
 
   /**
+   * Aero: the wooden benches a person may borrow to work beside a lead sitting on `leadSeatId`: free (not assigned, not in
+   * `borrowed`), a `WOODEN_BENCH` facing a PC, and in the lead's seat zone (a lead with no zone has none). Nearest to the lead first.
+   */
+  benchSeatsFor(leadSeatId: string, borrowed: ReadonlyMap<string, unknown>): string[] {
+    const lead = this.seats.get(leadSeatId);
+    const zone = this.seatZone(leadSeatId);
+    if (!lead || zone === null) return [];
+    const types = new Map<string, string>();
+    for (const item of this.layout.furniture) types.set(item.uid, item.type);
+    const electronics = this.buildElectronicsTileSet();
+    const found: Array<{ uid: string; d: number }> = [];
+    for (const [uid, seat] of this.seats) {
+      if (seat.assigned || borrowed.has(uid) || types.get(uid) !== 'WOODEN_BENCH') continue;
+      if (this.seatZone(uid) !== zone || !this.isSeatFacingElectronics(seat, electronics)) continue;
+      found.push({
+        uid,
+        d: Math.abs(seat.seatCol - lead.seatCol) + Math.abs(seat.seatRow - lead.seatRow),
+      });
+    }
+    return found.sort((a, b) => a.d - b.d || (a.uid < b.uid ? -1 : 1)).map((f) => f.uid);
+  }
+
+  /** Aero: the uids of the furniture that is on because somebody sits at it: active leads and the people on borrowed benches. */
+  poweredFurniture(): string[] {
+    const tiles = this.autoOnTiles();
+    const uids: string[] = [];
+    for (const item of this.layout.furniture) {
+      const entry = getCatalogEntry(item.type);
+      if (!entry || getOnStateType(item.type) === item.type) continue;
+      let hit = false;
+      for (let dr = 0; dr < entry.footprintH && !hit; dr++) {
+        for (let dc = 0; dc < entry.footprintW && !hit; dc++) {
+          hit = tiles.has(`${item.col + dc},${item.row + dr}`);
+        }
+      }
+      if (hit) uids.push(item.uid);
+    }
+    return uids;
+  }
+
+  /**
    * Does this seat face an electronics tile (PC, monitor)? Mirrors the
    * forward-and-flanking scan used by furniture auto-state.
    */
@@ -1150,14 +1191,10 @@ export class OfficeState {
     }
   }
 
-  /** Rebuild furniture instances with auto-state applied (active agents turn electronics ON) */
-  private rebuildFurnitureInstances(): void {
-    // Collect tiles where active agents face desks
+  /** The tiles whose electronics are on: those the seated active characters face, and those the people on borrowed benches face. */
+  private autoOnTiles(): Set<string> {
     const autoOnTiles = new Set<string>();
-    for (const ch of this.characters.values()) {
-      if (!ch.isActive || !ch.seatId) continue;
-      const seat = this.seats.get(ch.seatId);
-      if (!seat) continue;
+    const addFor = (seat: Seat): void => {
       // Find the desk tile(s) the agent faces from their seat
       const dCol =
         seat.facingDir === Direction.RIGHT ? 1 : seat.facingDir === Direction.LEFT ? -1 : 0;
@@ -1182,7 +1219,21 @@ export class OfficeState {
           autoOnTiles.add(`${baseCol + 1},${baseRow}`);
         }
       }
+    };
+    for (const ch of this.characters.values()) {
+      if (!ch.isActive || !ch.seatId) continue;
+      const seat = this.seats.get(ch.seatId);
+      if (seat) addFor(seat);
     }
+    // Aero: a person working on a borrowed bench turns on the PC it faces.
+    for (const seat of this.aero.activeBenchSeats()) addFor(seat);
+    return autoOnTiles;
+  }
+
+  /** Rebuild furniture instances with auto-state applied (active agents turn electronics ON) */
+  private rebuildFurnitureInstances(): void {
+    // Collect tiles where active agents face desks
+    const autoOnTiles = this.autoOnTiles();
 
     if (autoOnTiles.size === 0) {
       this.furniture = layoutToFurnitureInstances(this.layout.furniture);

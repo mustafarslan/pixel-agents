@@ -12,7 +12,7 @@
  *     "lunch": false,
  *     "meeting": { "time": "14:30", "title": "Design review", "soon": false } | null,
  *     "inbox": 3,
- *     "agents": [ { "name": "Code Reviewer", "slug": "code-reviewer", "room": "<12 hex>"? } ],
+ *     "agents": [ { "name": "Code Reviewer", "slug": "code-reviewer", "floor": "<12 hex>"? | "room": "<12 hex>"? } ],
  *     "lounge": true,
  *     "pods": {
  *       "mappings": { "<directoryName>": ["Pod 1"], "<directoryName>": ["Hot desks"], ... },
@@ -29,10 +29,18 @@
  * - `floor`: the one floor on show (one per repo; its bar and the other floors stay in Aero). `id` is 12 hex, `number` 1..16,
  *   `name` 1..32 characters, `rooms` at most 64 distinct directory names (12 hex, or `prruns`, which is on every floor). A
  *   character whose directory name is not in `rooms` (and its subagents and teammates) is not on this floor: hidden, with no seat.
+ * - `agents`: a project agent has the `floor` (the repo's floor id) it is staff of, or, with no floor (Rooms style, no repo),
+ *   the `room` of its worktree; never both. The owner's have neither: one shared set, on the floor on show unless its roster
+ *   has the type. At most 16 a floor, 16 for the rooms, 16 of the owner's, 272 in all; a slug once per floor, room or owner.
  * - Strings have no control, format or line-separator characters. Keys are exactly these; nothing else is accepted.
  */
 
-export const MAX_AGENTS = 8;
+/** Everything an update carries: 16 floors of 16, and the owner's 16 once. */
+export const MAX_AGENTS = 272;
+/** Staff of one floor, the agents of the rooms in all, and the owner's. A floor shows 16 in all, its own first. */
+export const MAX_AGENTS_PER_FLOOR = 16;
+export const MAX_AGENT_ROOMS = 16;
+export const MAX_OWNER_AGENTS = 16;
 export const MAX_NAME_CHARS = 40;
 export const MAX_TITLE_CHARS = 60;
 export const MAX_INBOX = 99_999;
@@ -54,10 +62,12 @@ export interface AeroAgent {
   /** What a SubagentStart's `agent_type` must equal, exactly. */
   slug: string;
   /**
-   * The worktree's room (its slug, the stub folder name) for a project agent: it is matched only for a lead whose
+   * The worktree's room (its slug, the stub folder name) for a project agent with no floor: it is matched only for a lead whose
    * `directoryName` is this. Absent for the owner's agents, which match any lead.
    */
   room?: string;
+  /** The repo's floor id for a project agent: it is staff of that floor, and on it only. Never with a room. */
+  floor?: string;
 }
 
 export interface AeroMeeting {
@@ -245,24 +255,42 @@ export function parseAeroUpdate(raw: unknown): AeroUpdate | null {
   if (!Array.isArray(agents) || agents.length > MAX_AGENTS) return null;
   const parsedAgents: AeroAgent[] = [];
   const seen = new Set<string>();
+  const perFloor = new Map<string, number>();
+  let inRooms = 0;
+  let owners = 0;
   for (const agent of agents) {
     if (!isPlainObject(agent)) return null;
-    const withRoom = hasKeys(agent, ['name', 'room', 'slug']);
-    if (!withRoom && !hasKeys(agent, ['name', 'slug'])) return null;
+    const keys = Object.keys(agent).sort();
+    const place = keys.includes('floor') ? 'floor' : keys.includes('room') ? 'room' : null;
+    const expected = place === null ? ['name', 'slug'] : [...['name', 'slug', place]].sort();
+    if (keys.length !== expected.length || !keys.every((k, i) => k === expected[i])) return null;
     const name = cleanText(agent.name, MAX_NAME_CHARS);
     if (name === null) return null;
     if (typeof agent.slug !== 'string' || !SLUG_RE.test(agent.slug)) return null;
-    if (withRoom && (typeof agent.room !== 'string' || !ROOM_RE.test(agent.room))) return null;
-    // One character per slug and room: a project's agent is in each of its worktrees.
-    const id = `${withRoom ? agent.room : ''}/${agent.slug}`;
+    const where = place === null ? null : agent[place];
+    if (place !== null && (typeof where !== 'string' || !ROOM_RE.test(where))) return null;
+    // One character per slug and floor (or room, or owner): a project's agent is staff of its floor.
+    const id = `${place ?? ''}:${where ?? ''}/${agent.slug}`;
     if (seen.has(id)) return null;
     seen.add(id);
+    if (place === 'floor') {
+      const count = (perFloor.get(where as string) ?? 0) + 1;
+      if (count > MAX_AGENTS_PER_FLOOR) return null;
+      perFloor.set(where as string, count);
+    } else if (place === 'room') {
+      if (++inRooms > MAX_AGENT_ROOMS) return null;
+    } else if (++owners > MAX_OWNER_AGENTS) {
+      return null;
+    }
     parsedAgents.push(
-      withRoom
-        ? { name, slug: agent.slug, room: agent.room as string }
-        : { name, slug: agent.slug },
+      place === 'floor'
+        ? { name, slug: agent.slug, floor: where as string }
+        : place === 'room'
+          ? { name, slug: agent.slug, room: where as string }
+          : { name, slug: agent.slug },
     );
   }
+  if (perFloor.size > MAX_FLOORS) return null;
 
   const update: AeroUpdate = {
     lunch,

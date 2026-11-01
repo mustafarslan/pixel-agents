@@ -441,23 +441,23 @@ test('configured characters stand in the Lounge, outside characters, and wander 
   assert.equal(os.getCharacterAt(people[0].ch.x, people[0].ch.y - 8), null);
 });
 
-test('at most eight configured characters; one dropped from the update leaves; a name change relabels', () => {
+test('at most sixteen configured characters; one dropped from the update leaves; a name change relabels', () => {
   const os = build();
   setAeroUpdate(
-    update({ agents: Array.from({ length: 8 }, (_, i) => ({ name: `A${i}`, slug: `a${i}` })) }),
+    update({ agents: Array.from({ length: 16 }, (_, i) => ({ name: `A${i}`, slug: `a${i}` })) }),
   );
   run(os, 1);
-  assert.equal(os.aero.people.length, 8);
+  assert.equal(os.aero.people.length, 16);
   setAeroUpdate(update({ agents: [{ name: 'Renamed', slug: 'a0' }] }));
   run(os, MATRIX_EFFECT_DURATION + 0.5);
   assert.deepEqual(
     os.aero.people.map((p) => [p.slug, p.name]),
     [['a0', 'Renamed']],
   );
-  // A rejected update (nine agents) changes nothing.
+  // A rejected update (seventeen agents) changes nothing.
   assert.equal(
     setAeroUpdate(
-      update({ agents: Array.from({ length: 9 }, (_, i) => ({ name: `B${i}`, slug: `b${i}` })) }),
+      update({ agents: Array.from({ length: 17 }, (_, i) => ({ name: `B${i}`, slug: `b${i}` })) }),
     ),
     false,
   );
@@ -761,12 +761,11 @@ test('a lead that comes back to its floor idle goes straight to its Lounge place
   assert.equal(at(os, 1), `${target.seatCol},${target.seatRow}`);
 });
 
-test('a SubagentStart of a lead on another floor hides both the stock subagent and the stand-in; they show when the floor is back', () => {
+test('a SubagentStart of a lead on another floor is queued with nobody assigned; matched, it is hidden with its stand-in while the floor is off, and shows when the floor is back', () => {
   const os = build();
   os.addAgent(1, 0, 0, DESK, true, FB);
-  assert.ok(
-    setAeroUpdate(onFloor(FA, { agents: [{ name: 'Code Reviewer', slug: 'code-reviewer' }] })),
-  );
+  const agents = [{ name: 'Code Reviewer', slug: 'code-reviewer' }];
+  assert.ok(setAeroUpdate(onFloor(FA, { agents })));
   run(os, MATRIX_EFFECT_DURATION + 0.5);
   const person = os.aero.people[0];
   assert.equal(
@@ -778,19 +777,27 @@ test('a SubagentStart of a lead on another floor hides both the stock subagent a
   const sub = os.characters.get(subId)!;
   assert.equal(
     os.aero.subagentStarted(1, 'tool-1', 'Subtask: code-reviewer'),
-    true,
-    'it stands in even for a lead off the floor',
+    false,
+    'queued: nobody is assigned for a lead off the floor',
   );
+  assert.equal(person.subId, null);
+  assert.equal(sub.aeroHidden, undefined);
+  assert.equal(os.aero.characters([]).includes(person.ch), true, 'still at home');
+  // Its floor on show: it is matched, the stock subagent hidden.
+  assert.ok(setAeroUpdate(onFloor(FB, { agents })));
+  os.update(0.1);
+  assert.equal(person.subId, subId);
   assert.equal(sub.aeroHidden, true);
+  assert.equal(os.aero.characters([]).includes(person.ch), true);
+  // The floor off again: the stand-in is hidden with its subagent, no poof for nobody.
   const fx = os.aero.fx.started.poof ?? 0;
+  assert.ok(setAeroUpdate(onFloor(FA, { agents })));
+  os.update(0.1);
   assert.equal(os.aero.characters([]).includes(person.ch), false, 'the stand-in is hidden with it');
-  assert.equal(os.aero.snapshot().people[0].away, true);
   run(os, 1);
   assert.equal(os.aero.characters([]).includes(person.ch), false);
   assert.equal(os.aero.fx.started.poof ?? 0, fx, 'no poof for a character nobody sees');
-  assert.ok(
-    setAeroUpdate(onFloor(FB, { agents: [{ name: 'Code Reviewer', slug: 'code-reviewer' }] })),
-  );
+  assert.ok(setAeroUpdate(onFloor(FB, { agents })));
   os.update(0.1);
   assert.equal(os.aero.characters([]).includes(person.ch), true);
   assert.equal(os.getCharacters().includes(sub), false, 'the stock subagent stays hidden');

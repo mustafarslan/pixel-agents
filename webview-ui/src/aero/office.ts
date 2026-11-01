@@ -15,7 +15,7 @@ import type { OfficeState } from '../office/engine/officeState.js';
 import { getCatalogEntry } from '../office/layout/furnitureCatalog.js';
 import { findPath } from '../office/layout/tileMap.js';
 import { getLoadedCharacterCount } from '../office/sprites/spriteData.js';
-import type { Character } from '../office/types.js';
+import type { Character, Seat } from '../office/types.js';
 import { CharacterState, Direction, TILE_SIZE } from '../office/types.js';
 import { Effects, type FxKind } from './effects.js';
 import {
@@ -34,6 +34,7 @@ import {
   type AeroPods,
   type AeroUpdate,
   agentTypeFromStatus,
+  MAX_AGENTS_PER_FLOOR,
   parseAeroUpdate,
   PR_RUNS_ROOM,
 } from './update.js';
@@ -78,6 +79,30 @@ function floorRooms(floor: AeroFloor): ReadonlySet<string> {
   return set;
 }
 
+const ownerShown = new WeakMap<AeroUpdate, ReadonlySet<string>>();
+
+/**
+ * The slugs of the owner's agents drawn on the floor on show: the floor's roster has 16 at most, its own types first, then the
+ * owner's types it lacks, in the order given, until 16. Built once per update (an update makes a new object); only for an update
+ * with a floor.
+ */
+function ownerSlugsShown(update: AeroUpdate, floor: AeroFloor): ReadonlySet<string> {
+  let set = ownerShown.get(update);
+  if (!set) {
+    const own = new Set<string>();
+    for (const a of update.agents) if (a.floor === floor.id) own.add(a.slug);
+    const shown = new Set<string>();
+    for (const a of update.agents) {
+      if (a.floor !== undefined || a.room !== undefined || own.has(a.slug)) continue;
+      if (own.size + shown.size >= MAX_AGENTS_PER_FLOOR) break;
+      shown.add(a.slug);
+    }
+    set = shown;
+    ownerShown.set(update, set);
+  }
+  return set;
+}
+
 /** @internal for tests */
 export function resetAeroUpdate(): void {
   latest = null;
@@ -111,7 +136,9 @@ export interface Route {
 
 export interface Person {
   slug: string;
-  /** The worktree room a project agent belongs to, or null (the owner's agents match any lead). */
+  /** The floor (the repo's floor id) a project agent is staff of, or null (the owner's agents, and the rooms' agents). */
+  floor: string | null;
+  /** The worktree room an agent of the Rooms style belongs to, or null (a floor's staff, and the owner's agents). */
   room: string | null;
   name: string;
   ch: Character;
@@ -119,7 +146,20 @@ export interface Person {
   subId: number | null;
   /** Walking home after an away trip: a poof when it gets there. */
   returning: boolean;
+  /** The pod bench it works on while away (borrowed, never `assigned`), or null. */
+  bench: string | null;
+  /** Whether it was sitting on that bench at the last look (the PC it faces follows). */
+  sitting: boolean;
 }
+
+/** A subagent whose lead was off the floor on show when it started: matched when the lead's floor is shown. */
+interface QueuedSubagent {
+  parentId: number;
+  toolId: string;
+  type: string;
+}
+
+const MAX_QUEUED = 64;
 
 interface Chat {
   /** Seconds until the next line; counts down while no line shows. */
@@ -158,6 +198,10 @@ export class AeroOffice {
    */
   private offFloor = new Set<number>();
   private syncing = false;
+
+  /** The pod benches people work on: seat uid to the person on it. Never `seat.assigned`. */
+  private borrowed = new Map<string, Person>();
+  private queued: QueuedSubagent[] = [];
 
   private cachedLayout: unknown = null;
   private cachedSeats: unknown = null;
@@ -203,6 +247,15 @@ export class AeroOffice {
       if (ch) this.stand(ch);
     }
     this.failed.clear();
+    // The seats are new: borrowed benches are let go, and taken again by the tick.
+    for (const person of this.people) {
+      if (person.bench !== null) {
+        person.ch.seatId = null;
+        person.bench = null;
+        person.sitting = false;
+      }
+    }
+    this.borrowed.clear();
     this.rehomePeople();
   }
 
@@ -604,14 +657,29 @@ export class AeroOffice {
 
   /**
    * Whether a configured character is on the floor on show: while it stands in for a subagent it is where that subagent's lead is;
-   * otherwise by its room (the owner's agents, with none, are on every floor).
+   * otherwise a floor's staff are on their floor, the Rooms style's by their room, and the owner's (with neither) on the floor on
+   * show unless its roster already has the type or is full (see `ownerSlugsShown`).
    */
-  private personOnFloor(person: Person): boolean {
+  personOnFloor(person: Person): boolean {
     if (person.subId !== null) {
       const sub = this.os.characters.get(person.subId);
       if (sub) return this.onFloor(sub);
     }
-    return this.roomOnFloor(person.room);
+    return this.homeOnFloor(person);
+  }
+
+  /** The configured characters whose names are drawn: on the floor on show (by `personOnFloor`) and not materializing. */
+  namedPeople(): Person[] {
+    return this.people.filter((p) => !p.ch.matrixEffect && this.personOnFloor(p));
+  }
+
+  /** Whether a configured character at home would be on the floor on show. */
+  private homeOnFloor(person: Person): boolean {
+    const update = getAeroUpdate();
+    const floor = update?.floor;
+    if (person.floor !== null) return !floor || floor.id === person.floor;
+    if (person.room !== null) return this.roomOnFloor(person.room);
+    return !update || !floor || ownerSlugsShown(update, floor).has(person.slug);
   }
 
   /**
@@ -705,6 +773,7 @@ export class AeroOffice {
       if (!this.os.characters.has(id)) this.failed.delete(id);
     }
     this.reconcilePeople(update);
+    this.matchQueued();
     this.watchUpdate(update);
     for (const person of [...this.people]) this.stepPerson(person, dt);
     this.fx.update(dt);
@@ -749,31 +818,33 @@ export class AeroOffice {
   }
 
   private reconcilePeople(update: AeroUpdate | null): void {
-    const idOf = (slug: string, room: string | null): string => `${room ?? ''}/${slug}`;
-    const wanted = new Map(
-      update ? update.agents.map((a) => [idOf(a.slug, a.room ?? null), a.name]) : [],
-    );
+    const idOf = (floor: string | null, room: string | null, slug: string): string =>
+      `${floor ?? ''}/${room ?? ''}/${slug}`;
+    const wanted = new Map<string, string>();
+    if (update) {
+      for (const a of update.agents) wanted.set(idOf(a.floor ?? null, a.room ?? null, a.slug), a.name);
+    }
+    const have = new Set<string>();
     for (const person of this.people) {
-      const name = wanted.get(idOf(person.slug, person.room));
+      const id = idOf(person.floor, person.room, person.slug);
+      const name = wanted.get(id);
       if (name === undefined) {
         if (person.ch.matrixEffect !== 'despawn') {
           this.unhide(person);
+          this.releaseBench(person, false);
           person.subId = null;
           startMatrixEffect(person.ch, 'despawn');
         }
       } else {
         person.name = name;
+        if (person.ch.matrixEffect !== 'despawn') have.add(id);
       }
     }
     if (!update) return;
     for (const agent of update.agents) {
+      const floor = agent.floor ?? null;
       const room = agent.room ?? null;
-      if (
-        this.people.some(
-          (p) => p.slug === agent.slug && p.room === room && p.ch.matrixEffect !== 'despawn',
-        )
-      )
-        continue;
+      if (have.has(idOf(floor, room, agent.slug))) continue;
       const spot = this.freeLoungeTile();
       if (!spot) continue;
       const slot = this.nextPersonSlot++;
@@ -796,11 +867,14 @@ export class AeroOffice {
       startMatrixEffect(ch, 'spawn');
       this.people.push({
         slug: agent.slug,
+        floor,
         room,
         name: agent.name,
         ch,
         subId: null,
         returning: false,
+        bench: null,
+        sitting: false,
       });
     }
   }
@@ -827,30 +901,157 @@ export class AeroOffice {
       if (effect === 'despawned') this.people = this.people.filter((p) => p !== person);
       return;
     }
-    // Its stand-in is gone: walk back to the Lounge.
+    const visible = this.personOnFloor(person);
+    // Its stand-in is gone: walk back to the Lounge, or, with nobody looking, be there at once.
     if (person.subId !== null && !os.subagentMeta.has(person.subId)) {
       person.subId = null;
-      person.returning = true;
+      this.releaseBench(person, false);
       ch.isActive = false;
       const spot = this.freeLoungeTile();
       ch.state = CharacterState.IDLE;
       ch.wanderTimer = 0.5;
-      if (spot && this.pathTo(ch, spot).length > 0) {
-        ch.path = this.pathTo(ch, spot);
-        ch.moveProgress = 0;
-        ch.state = CharacterState.WALK;
-        ch.frame = 0;
-        ch.frameTimer = 0;
+      if (!visible) {
+        person.returning = false;
+        if (spot) {
+          ch.tileCol = spot.col;
+          ch.tileRow = spot.row;
+        }
+        this.stand(ch);
+        ch.wanderTimer = 0.5;
+      } else {
+        person.returning = true;
+        if (spot && this.pathTo(ch, spot).length > 0) {
+          ch.path = this.pathTo(ch, spot);
+          ch.moveProgress = 0;
+          ch.state = CharacterState.WALK;
+          ch.frame = 0;
+          ch.frameTimer = 0;
+        }
       }
     }
+    // Not on the floor on show: it stands where it is, unseen, and holds no bench.
+    if (!this.personOnFloor(person)) {
+      this.releaseBench(person, false);
+      return;
+    }
+    if (person.subId !== null) this.tendBench(person);
     // Home it wanders over the Lounge floor only; away it is active and types where it stopped.
     const walkable = person.subId === null ? this.loungeWalkable : os.walkableTiles;
     updateCharacter(ch, dt, walkable, os.seats, os.tileMap, os.blockedTiles);
+    if (person.bench !== null) this.watchSitting(person);
     // Home again: a poof where the trip ends.
     if (person.returning && ch.state !== CharacterState.WALK) {
       person.returning = false;
       if (this.personOnFloor(person)) this.poofAt(ch);
     }
+  }
+
+  // ── Benches ──────────────────────────────────────────────────────
+
+  /** Seat uids of the benches active people sit on, for the PCs they face (the office turns those on). */
+  activeBenchSeats(): Seat[] {
+    const seats: Seat[] = [];
+    for (const [uid, person] of this.borrowed) {
+      const seat = this.os.seats.get(uid);
+      if (seat && person.ch.isActive && person.ch.state === CharacterState.TYPE) seats.push(seat);
+    }
+    return seats;
+  }
+
+  /** The PC a person faces follows whether it is sitting: the office rebuilds its furniture when that changes. */
+  private watchSitting(person: Person): void {
+    const sitting = person.ch.state === CharacterState.TYPE;
+    if (sitting === person.sitting) return;
+    person.sitting = sitting;
+    this.os.refreshFurniture();
+  }
+
+  /** Lets go of the person's bench. `standUp`: it gets up and takes the nearest free tile; else it stays where it is. */
+  private releaseBench(person: Person, standUp: boolean): void {
+    if (person.bench === null) return;
+    const ch = person.ch;
+    this.borrowed.delete(person.bench);
+    person.bench = null;
+    ch.seatId = null;
+    const wasSitting = person.sitting;
+    person.sitting = false;
+    if (standUp) {
+      const spot = this.nearestFreeTile(ch);
+      ch.state = CharacterState.IDLE;
+      ch.frame = 0;
+      ch.frameTimer = 0;
+      ch.path = [];
+      ch.moveProgress = 0;
+      if (spot) {
+        const path = this.pathTo(ch, spot);
+        if (path.length > 0) {
+          ch.path = path;
+          ch.state = CharacterState.WALK;
+        }
+      }
+    }
+    if (wasSitting) this.os.refreshFurniture();
+  }
+
+  /** Keeps a working person's bench honest: gone when somebody was seated on it or the lead's pod changed, taken when one is free. */
+  private tendBench(person: Person): void {
+    const os = this.os;
+    const meta = person.subId === null ? undefined : os.subagentMeta.get(person.subId);
+    const lead = meta ? os.characters.get(meta.parentAgentId) : undefined;
+    if (!lead || !lead.seatId) return;
+    if (person.bench !== null) {
+      const seat = os.seats.get(person.bench);
+      const zone = os.seatZone(lead.seatId);
+      if (!seat || seat.assigned || (zone !== null && os.seatZone(person.bench) !== zone)) {
+        this.releaseBench(person, true);
+      }
+    }
+    if (person.bench === null) this.takeBench(person, lead.seatId);
+  }
+
+  /** Walks the person to the nearest free wooden bench of the lead's pod facing a PC; false when there is none it can reach. */
+  private takeBench(person: Person, leadSeatId: string): boolean {
+    const os = this.os;
+    const ch = person.ch;
+    for (const uid of os.benchSeatsFor(leadSeatId, this.borrowed)) {
+      const seat = os.seats.get(uid);
+      if (!seat) continue;
+      const at = ch.tileCol === seat.seatCol && ch.tileRow === seat.seatRow;
+      const path = at ? [] : this.pathTo(ch, { col: seat.seatCol, row: seat.seatRow });
+      if (!at && path.length === 0) continue;
+      this.borrowed.set(uid, person);
+      person.bench = uid;
+      ch.seatId = uid;
+      ch.isActive = true;
+      if (at) {
+        this.stand(ch);
+        ch.state = CharacterState.TYPE;
+        ch.dir = seat.facingDir;
+      } else {
+        ch.path = path;
+        ch.moveProgress = 0;
+        ch.state = CharacterState.WALK;
+        ch.frame = 0;
+        ch.frameTimer = 0;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  private nearestFreeTile(from: Character): Tile | null {
+    const taken = this.occupied(Number.NaN);
+    let best: Tile | null = null;
+    let bestD = Infinity;
+    for (const t of this.os.walkableTiles) {
+      if (taken.has(key(t.col, t.row))) continue;
+      const d = Math.abs(t.col - from.tileCol) + Math.abs(t.row - from.tileRow);
+      if (d < bestD) {
+        bestD = d;
+        best = t;
+      }
+    }
+    return best;
   }
 
   /** The people at home stand on the Lounge floor: after a new layout, one that isn't on it moves to a free tile of it. */
@@ -870,24 +1071,53 @@ export class AeroOffice {
   }
 
   /**
-   * A SubagentStart named `status`'s type. If it matches a configured character that is free, that character walks to the
-   * lead's room, the stock subagent is hidden, and true is returned.
+   * A SubagentStart named `status`'s type. A lead on the floor on show: the subagent is matched at once (see `match`), and true
+   * is returned when a configured character took its place. A lead of another floor: the subagent is queued with nobody assigned
+   * (this runs once per subagent), matched when its lead's floor is shown; false.
    */
   subagentStarted(parentId: number, parentToolId: string, status: unknown): boolean {
     const type = agentTypeFromStatus(status);
     if (type === null) return false;
     const lead = this.os.characters.get(parentId);
     if (!lead) return false;
-    // A project agent only for a lead in its room (preferred); the owner's agents (no room) for any lead.
-    // One that is still spawning matches too; one that is despawning does not. (Two subagents of one type at once: the second
-    // stays stock while the character is away.)
+    if (!this.onFloor(lead)) {
+      if (this.queued.length >= MAX_QUEUED) this.queued.shift();
+      this.queued.push({ parentId, toolId: parentToolId, type });
+      return false;
+    }
+    return this.match(lead, parentToolId, type);
+  }
+
+  /** Matches the queued subagents whose lead's floor is shown now; drops those that ended or whose lead left. */
+  private matchQueued(): void {
+    if (this.queued.length === 0) return;
+    const keep: QueuedSubagent[] = [];
+    for (const q of this.queued) {
+      const lead = this.os.characters.get(q.parentId);
+      const subId = this.os.getSubagentId(q.parentId, q.toolId);
+      const sub = subId === null ? undefined : this.os.characters.get(subId);
+      if (!lead || !sub || sub.matrixEffect === 'despawn' || lead.matrixEffect === 'despawn') continue;
+      if (this.onFloor(lead)) this.match(lead, q.toolId, q.type);
+      else keep.push(q);
+    }
+    this.queued = keep;
+  }
+
+  /**
+   * A free person of the floor on show and the type, else a free person of the lead's room (the Rooms style), else a free owner
+   * person of the type whose roster the floor lacks, else nobody (the stock subagent stays). One that is still spawning matches
+   * too; one that is despawning does not. (Two subagents of one type at once: the second stays stock while the character is away.)
+   */
+  private match(lead: Character, parentToolId: string, type: string): boolean {
+    const floorId = getAeroUpdate()?.floor?.id ?? null;
     const free = (p: Person): boolean =>
       p.slug === type && p.ch.matrixEffect !== 'despawn' && p.subId === null;
     const person =
+      this.people.find((p) => free(p) && p.floor !== null && p.floor === floorId) ??
       this.people.find((p) => free(p) && p.room !== null && p.room === lead.directoryName) ??
-      this.people.find((p) => free(p) && p.room === null);
+      this.people.find((p) => free(p) && p.floor === null && p.room === null && this.homeOnFloor(p));
     if (!person) return false;
-    const subId = this.os.getSubagentId(parentId, parentToolId);
+    const subId = this.os.getSubagentId(lead.id, parentToolId);
     const sub = subId === null ? undefined : this.os.characters.get(subId);
     if (subId === null || !sub) return false;
     sub.aeroHidden = true;
@@ -897,8 +1127,10 @@ export class AeroOffice {
     // A stand-in for a subagent of another floor is hidden with it: no poof.
     if (this.personOnFloor(person)) this.poofAt(ch);
     ch.isActive = true;
+    // A free bench at a PC of the lead's pod, else the free tile nearest its desk (the lead's seat, not wherever the lead stands now:
+    // a lead resting in the Lounge is not where the work is).
+    if (lead.seatId && this.takeBench(person, lead.seatId)) return true;
     const taken = this.occupied(Number.NaN);
-    // To the lead's seat (its desk), not to wherever the lead stands now: a lead resting in the Lounge is not where the work is.
     const leadSeat = lead.seatId ? this.os.seats.get(lead.seatId) : undefined;
     const anchor: Tile = leadSeat
       ? { col: leadSeat.seatCol, row: leadSeat.seatRow }
@@ -998,6 +1230,7 @@ export class AeroOffice {
       })),
       people: this.people.map((p) => ({
         slug: p.slug,
+        floor: p.floor,
         room: p.room,
         name: p.name,
         id: p.ch.id,
@@ -1005,7 +1238,10 @@ export class AeroOffice {
         row: p.ch.tileRow,
         state: p.ch.state,
         away: p.subId !== null,
+        bench: p.bench,
       })),
+      benches: [...this.borrowed.keys()],
+      pcsOn: this.os.poweredFurniture(),
       leads: [...this.os.characters.values()]
         .filter((c) => !c.isSubagent)
         .map((c) => ({
@@ -1044,6 +1280,7 @@ export interface AeroSnapshot {
   }>;
   people: Array<{
     slug: string;
+    floor: string | null;
     room: string | null;
     name: string;
     id: number;
@@ -1051,7 +1288,13 @@ export interface AeroSnapshot {
     row: number;
     state: string;
     away: boolean;
+    /** The pod bench it works on, or null. */
+    bench: string | null;
   }>;
+  /** The pod benches people work on (borrowed, never assigned). */
+  benches: string[];
+  /** The uids of the furniture that is on because somebody sits at it (leads and people on benches). */
+  pcsOn: string[];
   /** Every lead (not a subagent): where it is and whether it works. */
   leads: Array<{
     id: number;

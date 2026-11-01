@@ -93,11 +93,11 @@ test('the meeting time is HH:MM and the title is capped and clean', () => {
   assert.notEqual(parseAeroUpdate(withMeeting('12:00', '\u{1F600}'.repeat(60))), null);
 });
 
-test('at most eight agents; names capped at 40 and clean; slugs exact; no repeats', () => {
+test("at most 16 of the owner's agents (the floors' caps are in aeroRoster.test.ts); names capped at 40 and clean; slugs exact; no repeats", () => {
   const agent = (n: number) => ({ name: `Agent ${n}`, slug: `agent-${n}` });
-  const eight = Array.from({ length: 8 }, (_, i) => agent(i));
-  assert.notEqual(parseAeroUpdate({ ...good(), agents: eight }), null);
-  assert.equal(parseAeroUpdate({ ...good(), agents: [...eight, agent(9)] }), null);
+  const sixteen = Array.from({ length: 16 }, (_, i) => agent(i));
+  assert.notEqual(parseAeroUpdate({ ...good(), agents: sixteen }), null);
+  assert.equal(parseAeroUpdate({ ...good(), agents: [...sixteen, agent(17)] }), null);
 
   const one = (name: unknown, slug: unknown) => ({ ...good(), agents: [{ name, slug }] });
   assert.notEqual(parseAeroUpdate(one('x'.repeat(40), 'a')), null);

@@ -422,11 +422,14 @@ test('a configured character of a room on another floor is hidden; the owner age
     person.tileRow = 6;
     os.aero.people.push({
       slug: agent.slug,
+      floor: null,
       room: 'room' in agent ? (agent.room ?? null) : null,
       name: agent.name,
       ch: person,
       subId: null,
       returning: false,
+      bench: null,
+      sitting: false,
     });
   });
   const ids = () => os.aero.characters([]).map((c) => c.id);

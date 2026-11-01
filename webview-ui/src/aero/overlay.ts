@@ -203,8 +203,7 @@ export function drawAeroOverlay(
   }
 
   // The configured characters' names.
-  for (const person of os.aero.people) {
-    if (person.ch.matrixEffect || !os.aero.roomOnFloor(person.room)) continue;
+  for (const person of os.aero.namedPeople()) {
     const top = spriteTop(person.ch);
     drawName(ctx, person.name, offsetX + top.x * zoom, offsetY + (top.y - 1) * zoom, zoom);
   }
