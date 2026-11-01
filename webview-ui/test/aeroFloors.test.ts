@@ -564,3 +564,47 @@ test('a teammate linked while its floor is hidden sits next to its lead when the
   assert.ok(Math.abs(a.seatCol - b.seatCol) + Math.abs(a.seatRow - b.seatRow) <= 2, 'next to it');
   assert.equal(new Set(seated(os)).size, 2);
 });
+
+test("a returning lead's stock subagent stands by the lead's seat, not where it stood before", () => {
+  const os = build();
+  os.addAgent(1, 0, 0, undefined, true, A);
+  const sub = os.addSubagent(1, 'tool-1');
+  onFloor('A');
+  os.update(0.1);
+  // The subagent stood far from the lead's seat when the floor was left.
+  const s = ch(os, sub);
+  s.tileCol = 17;
+  s.tileRow = 6;
+  s.x = 17 * 16 + 8;
+  s.y = 6 * 16 + 8;
+  onFloor('B');
+  os.update(0.1);
+  assert.equal(shown(os, sub), false);
+  onFloor('A');
+  os.update(0.1);
+  const lead = ch(os, 1);
+  const seatOf = os.seats.get(lead.seatId!)!;
+  const dist = Math.abs(s.tileCol - seatOf.seatCol) + Math.abs(s.tileRow - seatOf.seatRow);
+  assert.ok(dist <= 2, `the subagent stands ${dist} tiles from its lead's seat`);
+  assert.notDeepEqual([s.tileCol, s.tileRow], [seatOf.seatCol, seatOf.seatRow], 'not on the seat');
+  assert.equal(s.state, CharacterState.IDLE, 'it stands');
+  assert.deepEqual([s.x, s.y], [s.tileCol * 16 + 8, s.tileRow * 16 + 8], 'on the tile');
+  assert.equal(shown(os, sub), true);
+});
+
+test('a hidden stock subagent (a person stands in for it) is not moved when its lead returns', () => {
+  const os = build();
+  os.addAgent(1, 0, 0, undefined, true, A);
+  const sub = os.addSubagent(1, 'tool-1');
+  onFloor('A');
+  os.update(0.1);
+  const s = ch(os, sub);
+  s.aeroHidden = true;
+  s.tileCol = 17;
+  s.tileRow = 6;
+  onFloor('B');
+  os.update(0.1);
+  onFloor('A');
+  os.update(0.1);
+  assert.deepEqual([s.tileCol, s.tileRow], [17, 6]);
+});

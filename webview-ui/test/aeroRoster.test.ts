@@ -784,3 +784,111 @@ test('a working person with no bench does not search again every tick, and takes
   assert.ok(searches >= 1);
   assert.equal(p.bench, WOOD_A, 'the freed bench is taken');
 });
+
+// ── Loose ends: the Lounge tiles and the floor switch ──────────────
+
+const loungeKeys = (os: OfficeState): Set<string> =>
+  new Set(os.aero.loungeWalkable.map((t) => `${t.col},${t.row}`));
+
+test('a person spawns on a Lounge tile no hidden person of its floor stands on', () => {
+  const os = build();
+  os.aero.rng = () => 0;
+  assert.ok(setAeroUpdate(upd(FA, staff(FB, 'x'))));
+  spawned(os);
+  const x = person(os, 'x', FB);
+  assert.equal(onShow(os, 'x', FB), false, 'x is on another floor');
+  assert.ok(setAeroUpdate(upd(FA, staff(FB, 'x', 'y'))));
+  spawned(os);
+  const y = person(os, 'y', FB);
+  assert.notDeepEqual([y.ch.tileCol, y.ch.tileRow], [x.ch.tileCol, x.ch.tileRow]);
+});
+
+test('a hidden person of another floor does not take a tile from this floor’s person', () => {
+  const os = build();
+  os.aero.rng = () => 0;
+  assert.ok(setAeroUpdate(upd(FA, staff(FB, 'x'))));
+  spawned(os);
+  const x = person(os, 'x', FB);
+  assert.ok(setAeroUpdate(upd(FA, [...staff(FB, 'x'), ...staff(FA, 'y')])));
+  spawned(os);
+  const y = person(os, 'y', FA);
+  assert.deepEqual([y.ch.tileCol, y.ch.tileRow], [x.ch.tileCol, x.ch.tileRow], 'floors apart may share');
+});
+
+test('the owner’s people count with everyone: a floor’s person keeps off their tile', () => {
+  const os = build();
+  os.aero.rng = () => 0;
+  // The owner's reviewer is hidden on floor A (which has its own); it stands on the first tile.
+  assert.ok(setAeroUpdate(upd(FA, [...staff(FA, 'reviewer'), ...shared('reviewer')])));
+  spawned(os);
+  const owner = person(os, 'reviewer', null);
+  assert.equal(onShow(os, 'reviewer', null), false);
+  assert.ok(setAeroUpdate(upd(FA, [...staff(FA, 'reviewer'), ...shared('reviewer'), ...staff(FB, 'z')])));
+  spawned(os);
+  const z = person(os, 'z', FB);
+  assert.notDeepEqual([z.ch.tileCol, z.ch.tileRow], [owner.ch.tileCol, owner.ch.tileRow]);
+});
+
+test('with every Lounge tile held by people of its floor, a person still gets one (the old rule)', () => {
+  const os = build();
+  os.aero.rng = () => 0;
+  os.update(0.1);
+  os.aero.loungeWalkable = os.aero.loungeWalkable.slice(0, 3);
+  const n = os.aero.loungeWalkable.length;
+  assert.equal(n, 3);
+  const slugs = Array.from({ length: n }, (_, i) => `h${i}`);
+  assert.ok(setAeroUpdate(upd(FA, staff(FB, ...slugs))));
+  spawned(os);
+  assert.equal(os.aero.people.length, n);
+  const tiles = new Set(os.aero.people.map((p) => `${p.ch.tileCol},${p.ch.tileRow}`));
+  assert.equal(tiles.size, n, 'one each');
+  assert.ok(setAeroUpdate(upd(FA, staff(FB, ...slugs, 'extra'))));
+  spawned(os);
+  const extra = person(os, 'extra', FB);
+  assert.ok(extra, 'spawned');
+  assert.ok(loungeKeys(os).has(`${extra.ch.tileCol},${extra.ch.tileRow}`), 'on a Lounge tile');
+});
+
+test('an owner person walking home when the floor id changes is home at once, standing, without a poof', () => {
+  const os = build();
+  lead(os, 1, FA);
+  const agents = shared('reviewer');
+  assert.ok(setAeroUpdate(upd(FA, agents)));
+  spawned(os);
+  startReviewer(os);
+  const p = person(os, 'reviewer', null);
+  run(os, 0.3);
+  assert.ok(setAeroUpdate(upd(FA, agents)));
+  os.removeSubagent(1, 't1');
+  run(os, 0.2);
+  assert.equal(p.subId, null);
+  assert.equal(p.returning, true, 'walking home');
+  assert.equal(p.ch.state, CharacterState.WALK);
+  assert.equal(onShow(os, 'reviewer', null), true, 'seen on both floors');
+  const fx = os.aero.fx.started.poof ?? 0;
+  assert.ok(setAeroUpdate(upd(FB, agents)));
+  os.update(0.1);
+  assert.equal(p.returning, false);
+  assert.notEqual(p.ch.state, CharacterState.WALK);
+  assert.ok(loungeKeys(os).has(`${p.ch.tileCol},${p.ch.tileRow}`), 'on a Lounge tile');
+  assert.deepEqual([p.ch.x, p.ch.y], [p.ch.tileCol * 16 + 8, p.ch.tileRow * 16 + 8]);
+  assert.equal(os.aero.fx.started.poof ?? 0, fx, 'no poof');
+});
+
+test('a person walking home is left walking when the floor id does not change', () => {
+  const os = build();
+  lead(os, 1, FA);
+  const agents = shared('reviewer');
+  assert.ok(setAeroUpdate(upd(FA, agents)));
+  spawned(os);
+  startReviewer(os);
+  const p = person(os, 'reviewer', null);
+  run(os, 0.3);
+  os.removeSubagent(1, 't1');
+  run(os, 0.2);
+  assert.equal(p.returning, true);
+  assert.ok(setAeroUpdate(upd(FA, agents)));
+  os.update(0.1);
+  assert.equal(p.returning, true);
+  assert.equal(p.ch.state, CharacterState.WALK);
+});

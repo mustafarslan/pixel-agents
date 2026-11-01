@@ -759,6 +759,7 @@ export class AeroOffice {
     this.syncing = true;
     try {
       const parked = this.parkOffFloor();
+      this.snapReturningOnSwitch();
       const pods = getAeroUpdate()?.pods ?? null;
       if (pods !== this.podsApplied) {
         const first = this.podsApplied === null && pods !== null;
@@ -771,9 +772,36 @@ export class AeroOffice {
       this.arrivals = [];
       this.os.placeArrivals(arrivals);
       for (const ch of arrivals) this.settleArrival(ch);
+      for (const ch of arrivals) this.settleSubagent(ch);
       if (parked || arrivals.length > 0) this.os.refreshFurniture();
     } finally {
       this.syncing = false;
+    }
+  }
+
+  /** The id of the floor on show at the last sync (null: none); undefined before the first. */
+  private floorSeen: string | null | undefined = undefined;
+
+  /**
+   * When the floor on show changes, a person still walking home is placed on a free Lounge tile at once, standing, with no poof:
+   * the owner's people are on every floor, so nobody should be seen finishing its walk on the new one.
+   */
+  private snapReturningOnSwitch(): void {
+    const id = getAeroUpdate()?.floor?.id ?? null;
+    const was = this.floorSeen;
+    this.floorSeen = id;
+    if (was === undefined || was === id) return;
+    for (const person of this.people) {
+      if (!person.returning) continue;
+      const ch = person.ch;
+      const spot = this.freeLoungeTile(person, person);
+      if (spot) {
+        ch.tileCol = spot.col;
+        ch.tileRow = spot.row;
+      }
+      person.returning = false;
+      this.stand(ch);
+      ch.wanderTimer = 1;
     }
   }
 
@@ -849,6 +877,26 @@ export class AeroOffice {
     const mode: RouteMode = update.lunch && this.lounge.table.length > 0 ? 'lunch' : 'rest';
     const route = this.assign(ch, mode);
     if (route && !route.arrived) this.arrive(ch, route);
+  }
+
+  /**
+   * A stock subagent that comes back to the floor with its lead stands by the lead's seat (the free tile nearest it, else the lead's
+   * tile), not where it stood when the floor was left. One a person stands in for stays hidden where it is.
+   */
+  private settleSubagent(ch: Character): void {
+    if (!ch.isSubagent || ch.aeroHidden || ch.matrixEffect === 'despawn') return;
+    const parent = this.os.subagentMeta.get(ch.id)?.parentAgentId ?? ch.parentAgentId;
+    const lead = parent == null ? undefined : this.os.characters.get(parent);
+    if (!lead) return;
+    const seat = lead.seatId ? this.os.seats.get(lead.seatId) : undefined;
+    const anchor = seat
+      ? { tileCol: seat.seatCol, tileRow: seat.seatRow }
+      : { tileCol: lead.tileCol, tileRow: lead.tileRow };
+    this.dropRoute(ch.id);
+    const spot = this.nearestFreeTile(anchor) ?? { col: anchor.tileCol, row: anchor.tileRow };
+    ch.tileCol = spot.col;
+    ch.tileRow = spot.row;
+    this.stand(ch);
   }
 
   /** Whether any character is on another floor than the one on show. */
@@ -997,7 +1045,7 @@ export class AeroOffice {
       const floor = agent.floor ?? null;
       const room = agent.room ?? null;
       if (have.has(idOf(floor, room, agent.slug))) continue;
-      const spot = this.freeLoungeTile();
+      const spot = this.freeLoungeTile({ floor, room });
       if (!spot) continue;
       const slot = this.nextPersonSlot++;
       const palettes = Math.max(1, getLoadedCharacterCount());
@@ -1040,11 +1088,35 @@ export class AeroOffice {
     if (sub) sub.aeroHidden = false;
   }
 
-  private freeLoungeTile(): Tile | null {
+  /**
+   * A free Lounge tile for a person of `home`'s floor or room. Everyone at home that can be shown with it holds its tile, seen or
+   * not (its own floor's or room's people, and the owner's, which are on every floor; with no floor on show, all of them), so
+   * people do not stack when their floor comes round. When that leaves no tile, the tiles of the people shown now are all it counts.
+   */
+  private freeLoungeTile(home?: { floor: string | null; room: string | null }, self?: Person): Tile | null {
     const taken = this.occupied(Number.NaN);
-    const free = this.loungeWalkable.filter((t) => !taken.has(key(t.col, t.row)));
-    if (free.length === 0) return null;
-    return free[Math.floor(this.rng() * free.length) % free.length];
+    const strict = new Set(taken);
+    if (home) {
+      const sharedWith = (other: Person): boolean => {
+        if (!getAeroUpdate()?.floor) return true;
+        const owner = (p: { floor: string | null; room: string | null }) => p.floor === null && p.room === null;
+        if (owner(home) || owner(other)) return true;
+        return (
+          (home.floor !== null && other.floor === home.floor) ||
+          (home.room !== null && other.room === home.room)
+        );
+      };
+      for (const other of this.people) {
+        if (other === self || other.subId !== null || other.ch.matrixEffect === 'despawn') continue;
+        if (sharedWith(other)) strict.add(key(other.ch.tileCol, other.ch.tileRow));
+      }
+    }
+    const pick = (blocked: Set<string>): Tile | null => {
+      const free = this.loungeWalkable.filter((t) => !blocked.has(key(t.col, t.row)));
+      if (free.length === 0) return null;
+      return free[Math.floor(this.rng() * free.length) % free.length];
+    };
+    return pick(strict) ?? pick(taken);
   }
 
   private stepPerson(person: Person, dt: number): void {
@@ -1065,7 +1137,7 @@ export class AeroOffice {
       const visible = this.personOnFloor(person);
       this.releaseBench(person, false);
       ch.isActive = false;
-      const spot = this.freeLoungeTile();
+      const spot = this.freeLoungeTile(person, person);
       ch.state = CharacterState.IDLE;
       ch.wanderTimer = 0.5;
       if (!visible) {
@@ -1351,7 +1423,7 @@ export class AeroOffice {
     return false;
   }
 
-  private nearestFreeTile(from: Character): Tile | null {
+  private nearestFreeTile(from: { tileCol: number; tileRow: number }): Tile | null {
     const taken = this.occupied(Number.NaN);
     let best: Tile | null = null;
     let bestD = Infinity;
@@ -1379,7 +1451,7 @@ export class AeroOffice {
       }
       // At home on the new layout: whatever it was walking to (the old Lounge, a trip back) ends here, on the Lounge floor.
       if (!onFloor.has(key(ch.tileCol, ch.tileRow))) {
-        const spot = this.freeLoungeTile();
+        const spot = this.freeLoungeTile(person, person);
         if (spot) {
           ch.tileCol = spot.col;
           ch.tileRow = spot.row;
