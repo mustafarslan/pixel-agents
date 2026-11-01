@@ -146,6 +146,8 @@ export function ToolOverlay({
     dpr,
   );
 
+  // Aero's names, taken once for the whole render.
+  const nameLabels = officeState.aero.labelMap();
   const selectedId = officeState.selectedAgentId;
   const hoveredId = officeState.hoveredAgentId;
 
@@ -190,7 +192,7 @@ export function ToolOverlay({
                 top:
                   project.toScreenY(ch.y + bubbleSittingOff - BUBBLE_VERTICAL_OFFSET_PX) -
                   (cachedBubble.height + zoom) / dpr -
-                  bubbleLift(officeState, ch, zoom, {
+                  bubbleLift(officeState, nameLabels, ch, zoom, {
                     alwaysShowOverlay,
                     hoveredId,
                     selectedId,

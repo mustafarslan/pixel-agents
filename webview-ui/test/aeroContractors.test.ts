@@ -797,20 +797,26 @@ function drawn(
   os: OfficeState,
   show?: { alwaysShowOverlay: boolean; hoveredId: number | null; selectedId: number | null },
 ) {
-  const texts: Array<{ text: string; x: number; y: number }> = [];
-  const rects: Array<{ y: number; h: number }> = [];
+  let seq = 0;
+  let font = '';
+  const texts: Array<{ text: string; x: number; y: number; seq: number; size: number }> = [];
+  const rects: Array<{ y: number; h: number; seq: number }> = [];
   const ctx = new Proxy(
     {},
     {
       get(_t, prop) {
         if (prop === 'fillText')
-          return (text: string, x: number, y: number) => texts.push({ text, x, y });
+          return (text: string, x: number, y: number) =>
+            texts.push({ text, x, y, seq: seq++, size: Number(/(\d+)px/.exec(font)?.[1] ?? 0) });
         if (prop === 'fillRect')
-          return (_x: number, y: number, _w: number, h: number) => rects.push({ y, h });
+          return (_x: number, y: number, _w: number, h: number) => rects.push({ y, h, seq: seq++ });
         if (prop === 'measureText') return () => ({ width: 8 });
         return () => undefined;
       },
-      set: () => true,
+      set(_t, prop, value) {
+        if (prop === 'font') font = String(value);
+        return true;
+      },
     },
   ) as unknown as CanvasRenderingContext2D;
   drawAeroOverlay(ctx, os, 0, 0, 2, show);
@@ -910,7 +916,36 @@ test('the overlay draws one line, Name · Role, with the bubble above it', () =>
   const line = withBubble.texts.filter((t) => t.text === `${guard.first} · Security`).pop()!;
   const bubble = withBubble.texts.find((t) => t.text === '\u{1FAAA}')!;
   assert.equal(bubble.x, line.x, 'over the same centre');
-  assert.ok(bubble.y < line.y - 4, `the bubble (${bubble.y}) is above the name line (${line.y})`);
+  // The bubble's plate (the last rectangle before its text) ends at or above the top of the name's letters.
+  const plate = withBubble.rects.filter((r) => r.seq < bubble.seq).pop()!;
+  assert.ok(
+    plate.y + plate.h <= line.y - line.size,
+    `the bubble's plate ends at ${plate.y + plate.h}, below the name's top at ${line.y - line.size}`,
+  );
+});
+
+test('a route bubble over a lead in the Lounge stands above the lead’s name line', () => {
+  const os = floorA();
+  os.aero.routes.set(1, {
+    mode: 'lunch',
+    target: { col: 0, row: 0 },
+    seatUid: null,
+    arrived: true,
+    tries: 0,
+  });
+  const lead = labelOf(os, 'lead');
+  const out = drawn(os);
+  const line = out.texts.filter((t) => t.text === `${lead.first} · Lead`).pop()!;
+  const bubble = out.texts.find((t) => t.text === '\u{1F35C}')!;
+  const plate = out.rects.filter((r) => r.seq < bubble.seq).pop()!;
+  assert.ok(
+    plate.y + plate.h <= line.y - line.size,
+    `plate ends ${plate.y + plate.h}, name top ${line.y - line.size}`,
+  );
+  // The tool overlay showing for the lead hides the name, so the bubble stands where it always did.
+  const shown = drawn(os, { alwaysShowOverlay: true, hoveredId: null, selectedId: null });
+  const bare = shown.texts.find((t) => t.text === '\u{1F35C}')!;
+  assert.ok(bare.y > bubble.y, 'no name line, no lift');
 });
 
 test('a lead’s name is hidden while the tool overlay shows for it: hovered, selected or always', () => {
@@ -931,4 +966,113 @@ test('a lead’s name is hidden while the tool overlay shows for it: hovered, se
   const person = labelOf(os, 'person');
   const stays = drawn(os, { alwaysShowOverlay: true, hoveredId: null, selectedId: null });
   assert.ok(stays.texts.some((t) => t.text === `${person.first} · ${person.role}`));
+});
+
+// ── Fix round: stable names, orphans, looks, teammates ──
+
+const firstsById = (os: OfficeState) => new Map(labelsOf(os).map((l) => [l.id, l.first] as const));
+
+test('a lead keeps its first name when a lead of its folder with a lower id leaves', () => {
+  const os = floorA();
+  for (const id of [2, 3, 4]) {
+    os.addAgent(id, 0, 0, undefined, true, FA);
+    os.characters.get(id)!.directoryName = PR_RUNS_ROOM;
+  }
+  const before = firstsById(os);
+  const keysBefore = new Map(labelsOf(os).map((l) => [l.id, l.key] as const));
+  os.removeAgent(2);
+  run(os, MATRIX_EFFECT_DURATION + 0.5);
+  const after = firstsById(os);
+  assert.notEqual(
+    labelsOf(os).find((l) => l.id === 3)!.key,
+    keysBefore.get(3),
+    'control: its rank, and so its key, moved up',
+  );
+  for (const id of [3, 4]) assert.equal(after.get(id), before.get(id), `lead ${id}`);
+  assert.equal(after.has(2), false);
+});
+
+test('names stay when more characters arrive or the floor is switched and back', () => {
+  const slugs = Array.from({ length: 16 }, (_, i) => `t${String(i).padStart(2, '0')}`);
+  const os = floorA(buildFloor(), staff(FA, ...slugs));
+  const before = firstsById(os);
+  assert.ok(before.size >= 19);
+  // A contractor of the first type, whose key sorts among the staff.
+  start(os, 't00');
+  start(os, 't00');
+  assert.equal(labelsOf(os).filter((l) => l.kind === 'contractor').length, 1);
+  const during = firstsById(os);
+  for (const [id, first] of before)
+    assert.equal(during.get(id), first, `character ${id} after a hire`);
+  os.addAgent(2, 0, 0, undefined, true, FA);
+  os.addAgent(3, 0, 0, undefined, true, FA);
+  const more = firstsById(os);
+  for (const [id, first] of before)
+    assert.equal(more.get(id), first, `character ${id} after two leads`);
+  // The other floor on show and back.
+  const everyone = [...staff(FA, ...slugs), ...staff(FB, 'x1', 'x2')];
+  assert.ok(setAeroUpdate(upd(FB, everyone)));
+  run(os, 0.5);
+  assert.ok(setAeroUpdate(upd(FA, everyone)));
+  run(os, 0.5);
+  const back = firstsById(os);
+  for (const [id, first] of before)
+    assert.equal(back.get(id), first, `character ${id} after a floor switch`);
+});
+
+test('labels: a teammate has its lead’s key and a Teammate role', () => {
+  const os = floorA();
+  os.addAgent(2, 0, 0, undefined, true, FA);
+  os.characters.get(2)!.leadAgentId = 1;
+  const lead = labelOf(os, 'lead');
+  const mate = labelOf(os, 'teammate');
+  assert.equal(mate.id, 2);
+  assert.equal(mate.role, 'Teammate');
+  assert.equal(mate.key, `${lead.key}/mate/0`);
+});
+
+test('characters whose lead is not on show do not share a key or a name', () => {
+  const os = floorA();
+  for (const [id, leadId] of [
+    [2, 90],
+    [3, 91],
+    [4, 92],
+  ] as const) {
+    os.addAgent(id, 0, 0, undefined, true, FA);
+    os.characters.get(id)!.leadAgentId = leadId;
+  }
+  const mates = labelsOf(os).filter((l) => l.kind === 'teammate');
+  assert.equal(mates.length, 3);
+  assert.equal(new Set(mates.map((l) => l.key)).size, 3, 'three keys');
+  assert.equal(new Set(mates.map((l) => l.first)).size, 3, 'three names');
+});
+
+test('up to six staff on a floor never share a look, and none is tinted', () => {
+  const palettes = Math.max(1, getLoadedCharacterCount());
+  const slugs = ['a', 'b', 'c', 'd', 'e', 'f'].slice(0, palettes);
+  const os = floorA(buildFloor(), staff(FA, ...slugs));
+  const looks = os.aero.people
+    .filter((p) => !p.contractor)
+    .map((p) => [p.ch.palette, p.ch.hueShift]);
+  assert.equal(looks.length, slugs.length);
+  assert.equal(
+    new Set(looks.map((l) => l[0])).size,
+    slugs.length,
+    `palettes ${JSON.stringify(looks)}`,
+  );
+  assert.ok(
+    looks.every((l) => l[1] === 0),
+    'no hue turn while palettes last',
+  );
+  // The names follow the final palettes.
+  for (const l of labelsOf(os).filter((x) => x.kind === 'person')) {
+    const p = os.aero.people.find((x) => x.ch.id === l.id)!;
+    assert.equal(l.palette, p.ch.palette);
+  }
+  // The same floor made in another order gives the same looks.
+  resetAeroUpdate();
+  const again = floorA(buildFloor(), staff(FA, ...[...slugs].reverse()));
+  const byKey = (o: OfficeState) =>
+    Object.fromEntries(o.aero.people.map((p) => [p.slug, [p.ch.palette, p.ch.hueShift]]));
+  assert.deepEqual(byKey(again), byKey(os));
 });

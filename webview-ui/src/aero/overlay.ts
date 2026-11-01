@@ -79,16 +79,16 @@ export function nameLineLift(zoom: number): number {
 }
 
 /**
- * The lift a bubble over `ch` needs now: one name line when its name is drawn, else none. The tool overlay's bubbles use it too, so
- * both stack above the line.
+ * The lift a bubble over `ch` needs now: one name line when its name is drawn, else none. The tool overlay's bubbles use it too, with
+ * the labels it took once for its render (`os.aero.labelMap()`), so both stack above the line.
  */
 export function bubbleLift(
   os: OfficeState,
+  labels: ReadonlyMap<number, NameLabel>,
   ch: Character,
   zoom: number,
   show: OverlayShow | undefined,
 ): number {
-  const labels = new Map(os.aero.labels().map((l) => [l.id, l] as const));
   return nameFor(os, labels, ch, show) === null || os.aero.hides(ch) ? 0 : nameLineLift(zoom);
 }
 
@@ -228,7 +228,7 @@ export function drawAeroOverlay(
   show?: OverlayShow,
 ): void {
   ctx.save();
-  const labels = new Map(os.aero.labels().map((l) => [l.id, l] as const));
+  const labels = os.aero.labelMap();
   const lift = nameLineLift(zoom);
   // The effects first: the text of the wall objects, the badges and the names stay readable over them.
   drawPods(ctx, os, offsetX, offsetY, zoom);

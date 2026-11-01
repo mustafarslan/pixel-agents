@@ -29,7 +29,7 @@ import {
   wallHit,
   whiteboardRect,
 } from './lounge.js';
-import { assignFirstNames, hashKey, roleFromSlug } from './names.js';
+import { assignFirstNames, lookKey, pickLook, roleFromSlug } from './names.js';
 import {
   type AeroFloor,
   type AeroPods,
@@ -912,7 +912,10 @@ export class AeroOffice {
       ? { tileCol: seat.seatCol, tileRow: seat.seatRow }
       : { tileCol: lead.tileCol, tileRow: lead.tileRow };
     this.dropRoute(ch.id);
-    const spot = this.nearestFreeTile(anchor, ch.id) ?? { col: anchor.tileCol, row: anchor.tileRow };
+    const spot = this.nearestFreeTile(anchor, ch.id) ?? {
+      col: anchor.tileCol,
+      row: anchor.tileRow,
+    };
     ch.tileCol = spot.col;
     ch.tileRow = spot.row;
     this.stand(ch);
@@ -1060,6 +1063,31 @@ export class AeroOffice {
       }
     }
     if (!update) return;
+    // The looks of those about to be made, in key order, each the next free palette of its floor (no tint while palettes last).
+    const palettes = Math.max(1, getLoadedCharacterCount());
+    const scopeOf = (floor: string | null, room: string | null): string =>
+      `${floor ?? ''}/${room ?? ''}`;
+    const usedLooks = new Map<string, Set<string>>();
+    for (const p of this.people) {
+      if (p.contractor || p.ch.matrixEffect === 'despawn') continue;
+      const scope = scopeOf(p.floor, p.room);
+      let set = usedLooks.get(scope);
+      if (!set) usedLooks.set(scope, (set = new Set()));
+      set.add(lookKey(p.ch.palette, p.ch.hueShift));
+    }
+    const looks = new Map<string, { palette: number; hue: number }>();
+    const missing = update.agents
+      .map((a) => ({ key: idOf(a.floor ?? null, a.room ?? null, a.slug), a }))
+      .filter((m) => !have.has(m.key))
+      .sort((x, y) => (x.key < y.key ? -1 : x.key > y.key ? 1 : 0));
+    for (const { key, a } of missing) {
+      const scope = scopeOf(a.floor ?? null, a.room ?? null);
+      let set = usedLooks.get(scope);
+      if (!set) usedLooks.set(scope, (set = new Set()));
+      const look = pickLook(key, palettes, set);
+      set.add(lookKey(look.palette, look.hue));
+      looks.set(key, look);
+    }
     for (const agent of update.agents) {
       const floor = agent.floor ?? null;
       const room = agent.room ?? null;
@@ -1067,17 +1095,9 @@ export class AeroOffice {
       const spot = this.freeLoungeTile({ floor, room });
       if (!spot) continue;
       const slot = this.nextPersonSlot++;
-      const palettes = Math.max(1, getLoadedCharacterCount());
-      // The look follows the person's key, not the order it was made in, so its first name (made from the palette) is the same
-      // whenever it is made.
-      const look = hashKey(idOf(floor, room, agent.slug));
-      const ch = createCharacter(
-        PERSON_ID_BASE - slot,
-        look % palettes,
-        null,
-        null,
-        (Math.floor(look / palettes) % 6) * 60,
-      );
+      // The look follows the person's key and its floor's other people, not the order it was made in.
+      const look = looks.get(idOf(floor, room, agent.slug)) ?? { palette: 0, hue: 0 };
+      const ch = createCharacter(PERSON_ID_BASE - slot, look.palette, null, null, look.hue);
       ch.isActive = false;
       ch.state = CharacterState.IDLE;
       ch.dir = Direction.DOWN;
@@ -1452,7 +1472,10 @@ export class AeroOffice {
     return false;
   }
 
-  private nearestFreeTile(from: { tileCol: number; tileRow: number }, except = Number.NaN): Tile | null {
+  private nearestFreeTile(
+    from: { tileCol: number; tileRow: number },
+    except = Number.NaN,
+  ): Tile | null {
     const taken = this.occupied(except);
     let best: Tile | null = null;
     let bestD = Infinity;
@@ -1660,28 +1683,55 @@ export class AeroOffice {
     return this.enabled() ? wallHit(this.lounge, x, y) : null;
   }
 
-  private labelCache: { sig: string; labels: NameLabel[] } | null = null;
+  /** The first name each character was given (by id), kept until it leaves: names are made once, not remade as the set changes. */
+  private nameBook = new Map<number, { first: string; parity: number }>();
+  private labelCache: {
+    stamp: [number, number, number, number, AeroUpdate | null, number];
+    labels: NameLabel[];
+    byId: Map<number, NameLabel>;
+  } | null = null;
+
+  /** The labels by character id, from the same pass as `labels()`: one map for a whole frame. */
+  labelMap(): ReadonlyMap<number, NameLabel> {
+    this.labels();
+    return this.labelCache!.byId;
+  }
 
   /**
    * The name over every character on show. Keys: a person by `floor/room/slug` (a contractor's adds `#number`), the front desk by
    * role, a lead by its folder and its rank by id among the leads of that folder, a teammate by its lead's key and its rank, and a
-   * stock subagent likewise by its parent's. Nothing from a transcript (`agentName`, a subagent's type) is used. The first names are
-   * made together (see `assignFirstNames`), so no two on show are the same.
+   * stock subagent likewise by its parent's; one whose parent is not on show has its own id in the key. Nothing from a transcript
+   * (`agentName`, a subagent's type) is used.
+   *
+   * A first name is given once (`assignFirstNames`, from the salted key, never one in use on show) and kept by character id until
+   * the character leaves, whatever the keys and the others do; it is made again only when its palette's parity changes. The result
+   * is kept until something that can change it does (a tick, the characters or people counted, the update, the off-floor set), so
+   * a frame and a tool overlay render ask once; `force` always rebuilds (the snapshot).
    */
-  labels(): NameLabel[] {
+  labels(force = false): NameLabel[] {
+    const update = getAeroUpdate();
+    const stamp: [number, number, number, number, AeroUpdate | null, number] = [
+      this.clock,
+      this.os.characters.size,
+      this.people.length,
+      this.npcs.length,
+      update,
+      this.offFloor.size,
+    ];
+    const cached = this.labelCache;
+    if (!force && cached && cached.stamp.every((v, i) => v === stamp[i])) return cached.labels;
     type Entry = Omit<NameLabel, 'first'>;
     const entries: Entry[] = [];
     for (const p of this.people) {
       if (!this.personOnFloor(p)) continue;
       const base = personId(p.floor, p.room, p.slug);
+      const role = roleFromSlug(p.slug);
       entries.push({
         id: p.ch.id,
         kind: p.contractor ? 'contractor' : 'person',
         key: p.contractor ? `${base}#${p.contractor.number}` : base,
         palette: p.ch.palette,
-        role: p.contractor
-          ? `${roleFromSlug(p.slug)} #${p.contractor.number}`
-          : roleFromSlug(p.slug),
+        role: p.contractor ? `${role} #${p.contractor.number}` : role,
       });
     }
     for (const n of this.npcs) {
@@ -1693,47 +1743,79 @@ export class AeroOffice {
         role: DESK_LABEL_ROLES[n.role],
       });
     }
-    const shown = [...this.os.characters.values()].filter((c) => !this.hides(c) && !c.isGreeter);
-    const keyOf = new Map<number, string>();
-    const rankIn = (group: Character[], ch: Character, descending: boolean): number =>
-      [...group].sort((a, b) => (descending ? b.id - a.id : a.id - b.id)).indexOf(ch);
+    const shown: Character[] = [];
+    for (const c of this.os.characters.values()) {
+      if (!this.hides(c) && !c.isGreeter && c.matrixEffect !== 'despawn') shown.push(c);
+    }
+    // Each group is ranked once: leads by folder, teammates by lead, subagents by parent.
+    const groups = (list: Character[], by: (c: Character) => string, descending: boolean) => {
+      const map = new Map<string, Character[]>();
+      for (const c of list) {
+        const k = by(c);
+        const g = map.get(k);
+        if (g) g.push(c);
+        else map.set(k, [c]);
+      }
+      const rank = new Map<number, number>();
+      for (const g of map.values()) {
+        g.sort((a, b) => (descending ? b.id - a.id : a.id - b.id));
+        g.forEach((c, i) => rank.set(c.id, i));
+      }
+      return rank;
+    };
     const leads = shown.filter((c) => !c.isSubagent && c.leadAgentId === undefined);
+    const mates = shown.filter((c) => !c.isSubagent && c.leadAgentId !== undefined);
+    const subs = shown.filter((c) => c.isSubagent);
+    const folderOf = (c: Character): string => c.directoryName ?? '';
+    const leadRank = groups(leads, folderOf, false);
+    const mateRank = groups(mates, (c) => String(c.leadAgentId), false);
+    const subRank = groups(subs, (c) => String(c.parentAgentId), true);
+    const keyOf = new Map<number, string>();
     for (const ch of leads) {
-      const folder = ch.directoryName ?? '';
-      const key = `lead/${folder}/${rankIn(
-        leads.filter((o) => (o.directoryName ?? '') === folder),
-        ch,
-        false,
-      )}`;
+      const key = `lead/${folderOf(ch)}/${leadRank.get(ch.id)}`;
       keyOf.set(ch.id, key);
       entries.push({
         id: ch.id,
         kind: 'lead',
         key,
         palette: ch.palette,
-        role: folder === PR_RUNS_ROOM ? 'PR' : 'Lead',
+        role: folderOf(ch) === PR_RUNS_ROOM ? 'PR' : 'Lead',
       });
     }
-    const keyOfParent = (id: number | null | undefined): string =>
-      (id === null || id === undefined ? undefined : keyOf.get(id)) ?? 'lead/?';
-    const mates = shown.filter((c) => !c.isSubagent && c.leadAgentId !== undefined);
+    // A character whose parent is not on show has its own id in the key, so two of them never share one.
+    const parentKey = (ch: Character, parent: number | null | undefined): string =>
+      (parent === null || parent === undefined ? undefined : keyOf.get(parent)) ??
+      `orphan/${ch.id}`;
     for (const ch of mates) {
-      const group = mates.filter((o) => o.leadAgentId === ch.leadAgentId);
-      const key = `${keyOfParent(ch.leadAgentId)}/mate/${rankIn(group, ch, false)}`;
+      const key = `${parentKey(ch, ch.leadAgentId)}/mate/${mateRank.get(ch.id)}`;
       keyOf.set(ch.id, key);
       entries.push({ id: ch.id, kind: 'teammate', key, palette: ch.palette, role: 'Teammate' });
     }
-    const subs = shown.filter((c) => c.isSubagent);
     for (const ch of subs) {
-      const group = subs.filter((o) => o.parentAgentId === ch.parentAgentId);
-      const key = `${keyOfParent(ch.parentAgentId)}/sub/${rankIn(group, ch, true)}`;
+      const key = `${parentKey(ch, ch.parentAgentId)}/sub/${subRank.get(ch.id)}`;
       entries.push({ id: ch.id, kind: 'subagent', key, palette: ch.palette, role: 'Subagent' });
     }
-    const sig = entries.map((e) => `${e.key}|${e.palette}|${e.role}|${e.id}`).join('\n');
-    if (this.labelCache?.sig === sig) return this.labelCache.labels;
-    const firsts = assignFirstNames(entries);
-    const labels = entries.map((e) => ({ ...e, first: firsts.get(e.key) ?? '' }));
-    this.labelCache = { sig, labels };
+    // The book forgets those that left (anywhere, not only off this floor), and keeps the rest by id.
+    const alive = new Set<number>();
+    for (const p of this.people) alive.add(p.ch.id);
+    for (const n of this.npcs) alive.add(n.ch.id);
+    for (const id of this.os.characters.keys()) alive.add(id);
+    for (const id of this.nameBook.keys()) if (!alive.has(id)) this.nameBook.delete(id);
+    const fresh: Entry[] = [];
+    const inUse = new Set<string>();
+    for (const e of entries) {
+      const kept = this.nameBook.get(e.id);
+      if (kept && kept.parity === e.palette % 2) inUse.add(kept.first);
+      else fresh.push(e);
+    }
+    if (fresh.length > 0) {
+      const firsts = assignFirstNames(fresh, inUse);
+      for (const e of fresh) {
+        this.nameBook.set(e.id, { first: firsts.get(e.key) ?? '', parity: e.palette % 2 });
+      }
+    }
+    const labels = entries.map((e) => ({ ...e, first: this.nameBook.get(e.id)?.first ?? '' }));
+    this.labelCache = { stamp, labels, byId: new Map(labels.map((l) => [l.id, l] as const)) };
     return labels;
   }
 
@@ -1810,7 +1892,7 @@ export class AeroOffice {
         greeting: this.greetingFor(n),
       })),
       greetings: { ...this.greetings },
-      labels: this.labels().map((l) => ({ ...l })),
+      labels: this.labels(true).map((l) => ({ ...l })),
     };
   }
 }

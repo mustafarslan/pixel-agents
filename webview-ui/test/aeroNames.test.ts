@@ -10,7 +10,9 @@ import { test } from 'vitest';
 import {
   assignFirstNames,
   hashKey,
+  lookKey,
   MEN_NAMES,
+  pickLook,
   roleFromSlug,
   WOMEN_NAMES,
 } from '../src/aero/names.js';
@@ -47,9 +49,12 @@ test('names are unique among those on show, and the same for the same set whatev
   assert.equal(new Set(first.values()).size, 60, 'sixty men, sixty names');
   const reversed = assignFirstNames([...entries].reverse());
   assert.deepEqual([...reversed].sort(), [...first].sort());
-  // One alone gets the name its key hashes to.
+  // One alone gets the name its salted key hashes to.
   const alone = assignFirstNames([{ key: 'floor/3/slug', palette: 2 }]);
-  assert.equal(alone.get('floor/3/slug'), MEN_NAMES[hashKey('floor/3/slug') % MEN_NAMES.length]);
+  assert.equal(
+    alone.get('floor/3/slug'),
+    MEN_NAMES[hashKey('name:floor/3/slug') % MEN_NAMES.length],
+  );
 });
 
 test('more characters than names still gets everyone a name (the repeats come last)', () => {
@@ -70,4 +75,41 @@ test('a role from a slug: the code- and aero- prefixes go, words are title-cased
   assert.equal(roleFromSlug('code-'), 'Code');
   assert.equal(roleFromSlug(''), 'Agent');
   assert.ok(roleFromSlug('x'.repeat(80)).length <= 20);
+});
+
+test('the whole of each list is reachable as a first pick: even and odd places both occur, whatever the keys end in', () => {
+  for (const suffix of ['', '#2', '/0']) {
+    const places = new Set<number>();
+    for (let i = 0; i < 400; i++) {
+      const only = assignFirstNames([{ key: `aaaaaaaaaaaa/${i}/slug${suffix}`, palette: 0 }]);
+      places.add(MEN_NAMES.indexOf([...only.values()][0]!));
+    }
+    assert.ok([...places].some((p) => p % 2 === 0) && [...places].some((p) => p % 2 === 1), suffix);
+    assert.ok(
+      places.size > MEN_NAMES.length * 0.8,
+      `${suffix}: ${places.size} of ${MEN_NAMES.length} places`,
+    );
+  }
+});
+
+test('names in use are avoided: a character named later never takes one that is taken', () => {
+  const key = 'floor/x/slug';
+  const alone = assignFirstNames([{ key, palette: 0 }]).get(key)!;
+  const next = assignFirstNames([{ key, palette: 0 }], new Set([alone])).get(key)!;
+  assert.notEqual(next, alone);
+  assert.ok(MEN_NAMES.includes(next));
+});
+
+test('a look: the key’s own palette with no tint, the next free palette when it is taken, a hue turn only when all are used', () => {
+  const key = 'f//x';
+  const own = pickLook(key, 6, new Set());
+  assert.deepEqual([own.hue], [0]);
+  assert.equal(own.palette, hashKey(key) % 6);
+  const next = pickLook(key, 6, new Set([lookKey(own.palette, 0)]));
+  assert.equal(next.palette, (own.palette + 1) % 6);
+  assert.equal(next.hue, 0);
+  const all = new Set(Array.from({ length: 6 }, (_, p) => lookKey(p, 0)));
+  const turned = pickLook(key, 6, all);
+  assert.equal(turned.palette, own.palette);
+  assert.equal(turned.hue, 60);
 });
