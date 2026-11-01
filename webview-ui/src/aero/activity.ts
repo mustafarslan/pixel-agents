@@ -35,17 +35,22 @@ export function activityOf(type: string): Activity {
 export const readsAt = (a: Activity): boolean => a === 'read' || a === 'review';
 
 const AT_A_PC: StationGroup[] = ['pc', 'focus', 'hot', 'library', 'meeting'];
+const PR_AT_A_PC: StationGroup[] = ['hot', 'pc', 'focus', 'library', 'meeting'];
 
 /**
  * The station groups an activity tries, in order. The pod's bottom benches face the hall with no desk and are for waiting, not work.
  */
-export function chainOf(a: Activity): StationGroup[] {
+export function chainOf(a: Activity, prLead = false): StationGroup[] {
+  // A PR lead's bay has no PC bench for them (its side benches face down), so they start at the hot desks, before the focus seats.
+  const atAPc = prLead ? PR_AT_A_PC : AT_A_PC;
   switch (a) {
     case 'read':
-      return ['library', 'shelf', 'pc', 'focus', 'hot', 'meeting'];
+      return prLead
+        ? ['library', 'shelf', 'hot', 'pc', 'focus', 'meeting']
+        : ['library', 'shelf', 'pc', 'focus', 'hot', 'meeting'];
     case 'plan':
-      return ['whiteboard', ...AT_A_PC];
+      return ['whiteboard', ...atAPc];
     default:
-      return AT_A_PC;
+      return atAPc;
   }
 }

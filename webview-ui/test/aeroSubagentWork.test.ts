@@ -16,7 +16,7 @@ import { ACTIVITY_BUBBLE, activityOf, chainOf } from '../src/aero/activity.js';
 import { resetAeroUpdate, setAeroUpdate } from '../src/aero/office.js';
 import { drawAeroOverlay, spriteTop } from '../src/aero/overlay.js';
 import { AREA_LABEL_FALLBACK_COLOR, CHARACTER_SITTING_OFFSET_PX } from '../src/constants.js';
-import { getCharacterSprite } from '../src/office/engine/characters.js';
+import { getCharacterSprite, sittingOffsetPx } from '../src/office/engine/characters.js';
 import { OfficeState } from '../src/office/engine/officeState.js';
 import { buildDynamicCatalog } from '../src/office/layout/furnitureCatalog.js';
 import type { OfficeLayout, PlacedFurniture } from '../src/office/types.js';
@@ -43,6 +43,8 @@ const MEETING = ['meet-a', 'meet-b'];
 const GUARD = 'aero-0a1b2c3d-security-2';
 const RECEPTION = 'aero-0a1b2c3d-reception-0';
 const LOUNGE_SEAT = 'aero-0a1b2c3d-lounge-2';
+const PR_LEAD = 'pr-lead';
+const FB = 'bbbbbbbbbbbb';
 /** The whiteboard's front tile, the cooler's front tile, the hot-desk shelf's fronts and the library shelf's fronts. */
 const BOARD_FRONT = { col: 1, row: 6 };
 const COOLER_FRONT = { col: 7, row: 4 };
@@ -130,6 +132,11 @@ function buildWorld(): OfficeState {
     f('aero-0a1b2c3d-lounge-0', 'WHITEBOARD', 32, 17),
     f('aero-0a1b2c3d-lounge-1', 'CLOCK', 34, 17),
     f(LOUNGE_SEAT, 'SOFA_FRONT', 33, 19),
+    // The PR bay (columns 15-19, rows 2-6): a lead bench at a PC, and a side bench facing down with no PC.
+    f('pc-pr', 'PC_OFF', 16, 2),
+    f('desk-pr', 'DESK', 16, 3),
+    f(PR_LEAD, 'CUSHIONED_BENCH', 16, 4),
+    f('pr-side', 'WOODEN_BENCH', 18, 6),
     // The lifts, for contractors.
     f('lift-0', 'AERO_ELEVATOR', 20, 22),
     f('lift-1', 'AERO_ELEVATOR', 22, 22),
@@ -139,6 +146,7 @@ function buildWorld(): OfficeState {
     for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) areaTiles[r * COLS + c] = label;
   };
   zone('Pod 1', 1, 7, 2, 6);
+  zone('PR Runs', 15, 19, 2, 6);
   zone('Focus', 10, 12, 2, 6);
   zone('Hot desks', 10, 19, 8, 13);
   zone('Library', 22, 33, 8, 13);
@@ -151,10 +159,12 @@ function buildWorld(): OfficeState {
     rows: ROWS,
     tiles: new Array<TileType>(COLS * ROWS).fill(TileType.FLOOR_1),
     furniture,
-    areas: ['Pod 1', 'Focus', 'Hot desks', 'Library', 'Hall', 'Meeting', 'Lounge'].map((label) => ({
-      label,
-      color: AREA_LABEL_FALLBACK_COLOR,
-    })),
+    areas: ['Pod 1', 'PR Runs', 'Focus', 'Hot desks', 'Library', 'Hall', 'Meeting', 'Lounge'].map(
+      (label) => ({
+        label,
+        color: AREA_LABEL_FALLBACK_COLOR,
+      }),
+    ),
     areaTiles,
     pets: [],
   };
@@ -167,7 +177,7 @@ const upd = (agents: unknown[] = []): Record<string, unknown> => ({
   inbox: 0,
   lounge: true,
   agents,
-  pods: { mappings: { [FA]: ['Pod 1'] }, labels: {} },
+  pods: { mappings: { [FA]: ['Pod 1'], [FB]: ['Hot desks'], prruns: ['PR Runs'] }, labels: {} },
   floor: { id: FA, number: 1, name: 'f', rooms: [FA] },
 });
 const staff = (...slugs: string[]) =>
@@ -514,6 +524,8 @@ test('a reviewer reads at a PC bench: the PC is on and the sprite is the reading
   assert.ok(s.seat === WOOD_A || s.seat === WOOD_B);
   assert.equal(os.characters.get(id)!.aeroReading, true);
   assert.equal(os.characters.get(id)!.aeroStanding, false);
+  const pc = s.seat === WOOD_A ? 'pc-2' : 'pc-6';
+  assert.ok(os.aero.snapshot().pcsOn.includes(pc), 'the PC it reads at is on');
 });
 
 test('bubbles come from the fixed table only: a type’s own text is never shown', () => {
@@ -631,6 +643,184 @@ test('a person with its seat taken by the pod goes on to the chain like a stock 
   assert.deepEqual({ col: person.ch.tileCol, row: person.ch.tileRow }, BOARD_FRONT);
   assert.equal(person.ch.dir, Direction.UP);
   assert.equal(person.ch.aeroStanding, true);
+});
+
+// ── Fix round ──────────────────────────────────────────────────────
+
+const seatsHeld = (os: OfficeState) =>
+  [...os.seats]
+    .filter(([, seat]) => seat.assigned)
+    .map(([uid]) => uid)
+    .sort();
+const DESK_HELD = [GUARD, LEAD, RECEPTION].sort();
+
+test('fix 1: a rebuild gives no stock seat to a subagent behind a person, at a prop or at the cooler', () => {
+  const os = floor(staff('reviewer'));
+  spawn(os, 'reviewer');
+  work(os, 'Plan');
+  const idle = work(os, 'general-purpose');
+  os.setAgentActive(idle.id, false);
+  run(os, 40);
+  assert.ok(os.aero.snapshot().subagents.find((s) => s.id === idle.id)!.cooler, 'at the cooler');
+  os.rebuildFromLayout(os.getLayout());
+  assert.deepEqual(seatsHeld(os), DESK_HELD, 'right after the rebuild');
+  run(os, 5);
+  assert.deepEqual(seatsHeld(os), DESK_HELD, 'and after a few ticks');
+  for (const ch of os.characters.values()) {
+    if (ch.isSubagent) assert.equal(ch.seatId === null || !os.seats.get(ch.seatId)?.assigned, true);
+  }
+});
+
+test('fix 2: the snapshot’s activity is the subagent’s own, from its type, whether or not it holds a station', () => {
+  const os = floor();
+  const a = work(os, 'Explore');
+  assert.equal(sub(os, a.id).activity, 'read');
+  assert.equal(sub(os, a.id).station, true);
+  os.setAgentActive(a.id, false);
+  run(os, 40);
+  const s = sub(os, a.id);
+  assert.equal(s.station, false, 'let go of its station');
+  assert.equal(s.activity, 'read', 'still an Explore');
+  const b = spawn(os, 'Plan');
+  assert.equal(sub(os, b.id).activity, 'plan', 'before it has a station');
+});
+
+test('fix 3: switching floors lets the old floor’s stations go before the new floor’s subagents are placed; an idle one is not seated on return', () => {
+  const os = floor();
+  os.addAgent(2, 0, 0, undefined, true, FB);
+  os.setAgentActive(2, true);
+  const other = (id: string) => ({ id, number: 2, name: 'g', rooms: [id] });
+  // Floor A's four subagents fill the two PC benches and both focus chairs.
+  const aSubs = [1, 2, 3, 4].map(() => work(os, 'general-purpose'));
+  assert.deepEqual(
+    aSubs.map((x) => sub(os, x.id).seat).filter((u) => FOCUS.includes(u!)).length,
+    2,
+  );
+  // Floor B's subagent starts off the floor on show.
+  const b = spawn(os, 'general-purpose', 2);
+  run(os, MATRIX_EFFECT_DURATION + 1);
+  assert.equal(sub(os, b.id).seat, null, 'hidden away on floor B: no station');
+  const toB = upd();
+  toB.floor = other(FB);
+  assert.ok(setAeroUpdate(toB));
+  os.update(0.1);
+  const onB = sub(os, b.id);
+  assert.ok(
+    FOCUS.includes(onB.seat!),
+    `placed at the first free tier (a focus chair), got ${onB.seat}`,
+  );
+  for (const x of aSubs) assert.equal(sub(os, x.id).seat, null, 'floor A’s let go');
+  // An idle subagent of floor A is not seated at a work station when its floor comes back.
+  os.setAgentActive(aSubs[0].id, false);
+  run(os, 1);
+  assert.ok(setAeroUpdate(upd()));
+  os.update(0.1);
+  const idleAgain = sub(os, aSubs[0].id);
+  assert.equal(idleAgain.seat, null);
+  assert.equal(idleAgain.stand, null);
+  assert.notEqual(os.characters.get(aSubs[0].id)!.state, CharacterState.TYPE);
+  const busy = sub(os, aSubs[1].id);
+  assert.ok(busy.seat !== null, 'a working one is seated');
+});
+
+test('fix 4: a type that arrives ticks after the spawn moves the subagent at once, inside the hold', () => {
+  const os = floor();
+  const tool = `tool-late-${++toolCount}`;
+  const id = os.addSubagent(1, tool);
+  os.setAgentTool(id, 'Subtask');
+  os.setAgentActive(id, true);
+  run(os, MATRIX_EFFECT_DURATION + 2);
+  const first = sub(os, id);
+  assert.ok(first.seat === WOOD_A || first.seat === WOOD_B, 'a PC bench by default');
+  os.aero.subagentStarted(1, tool, 'Subtask: Plan');
+  run(os, 0.5);
+  const moving = sub(os, id);
+  assert.equal(moving.seat, null, 'the bench is let go within half a second');
+  assert.deepEqual(moving.stand, BOARD_FRONT);
+  run(os, 30);
+  assert.deepEqual(sub(os, id).stand, BOARD_FRONT);
+  assert.equal(os.characters.get(id)!.state, CharacterState.TYPE);
+});
+
+test('fix 5: two subagents of one pod going idle at once do not share the cooler tile', () => {
+  const os = floor();
+  const a = work(os, 'general-purpose');
+  const b = work(os, 'general-purpose');
+  os.setAgentActive(a.id, false);
+  os.setAgentActive(b.id, false);
+  run(os, 60);
+  const at = (id: number) => {
+    const c = os.characters.get(id)!;
+    return `${c.tileCol},${c.tileRow}`;
+  };
+  assert.notEqual(at(a.id), at(b.id));
+  const atCooler = [a, b].filter((x) => at(x.id) === `${COOLER_FRONT.col},${COOLER_FRONT.row}`);
+  assert.equal(atCooler.length, 1, 'one at the cooler');
+  const stayed = [a, b].find((x) => !atCooler.includes(x))!;
+  assert.ok(sub(os, stayed.id).seat !== null, 'the other stays on its bench');
+});
+
+test('fix 6: a working subagent with no free station stands facing down, without the sitting offset', () => {
+  const os = floor();
+  for (let i = 0; i < 10; i++) work(os, 'general-purpose');
+  const { id } = work(os, 'general-purpose');
+  const s = sub(os, id);
+  assert.equal(s.seat, null);
+  assert.equal(s.station, false);
+  const ch = os.characters.get(id)!;
+  assert.equal(ch.aeroStanding, true);
+  assert.equal(sittingOffsetPx(ch), 0);
+  assert.equal(ch.dir, Direction.DOWN);
+});
+
+test('fix 7: a PR lead’s subagents start at the hot desks, before the focus seats', () => {
+  const os = floor();
+  os.addAgent(2, 0, 0, undefined, true, 'prruns');
+  os.setAgentActive(2, true);
+  run(os, MATRIX_EFFECT_DURATION + 1);
+  assert.equal(os.characters.get(2)!.seatId, PR_LEAD);
+  const a = spawn(os, 'general-purpose', 2);
+  run(os, MATRIX_EFFECT_DURATION + 1);
+  until(os, () => sub(os, a.id).seat !== null, 60);
+  assert.ok(HOT.includes(sub(os, a.id).seat!), `a hot desk, got ${sub(os, a.id).seat}`);
+  assert.equal(os.seats.get('pr-side')!.assigned, false);
+});
+
+test('fix 8: nearest first within a tier; a person overflows from a full pod to the next tier', () => {
+  const os = floor(staff('reviewer'));
+  work(os, 'general-purpose');
+  work(os, 'general-purpose');
+  const f1 = work(os, 'general-purpose');
+  const f2 = work(os, 'general-purpose');
+  assert.equal(sub(os, f1.id).seat, FOCUS[0], 'focus-a is 6 tiles from the lead, focus-b 7');
+  assert.equal(sub(os, f2.id).seat, FOCUS[1]);
+  const os2 = floor();
+  const e1 = work(os2, 'Explore');
+  const e2 = work(os2, 'Explore');
+  assert.equal(sub(os2, e1.id).seat, LIBRARY[0]);
+  assert.equal(sub(os2, e2.id).seat, LIBRARY[1]);
+  // A person: the pod’s benches taken, the reviewer goes on to the focus chairs.
+  const os3 = floor(staff('reviewer'));
+  work(os3, 'general-purpose');
+  work(os3, 'general-purpose');
+  const { id } = spawn(os3, 'reviewer');
+  run(os3, MATRIX_EFFECT_DURATION + 0.5);
+  const person = os3.aero.people.find((p) => p.slug === 'reviewer')!;
+  assert.equal(person.subId, id);
+  until(os3, () => person.ch.state === CharacterState.TYPE, 90);
+  assert.ok(FOCUS.includes(person.bench!), `a focus chair, got ${person.bench}`);
+  assert.equal(os3.seats.get(person.bench!)!.assigned, false);
+});
+
+test('fix 10: a layout rebuild takes a subagent off the cooler', () => {
+  const os = floor();
+  const { id } = work(os, 'general-purpose');
+  os.setAgentActive(id, false);
+  run(os, 40);
+  assert.equal(sub(os, id).cooler, true);
+  os.rebuildFromLayout(os.getLayout());
+  run(os, 0.5);
+  assert.equal(sub(os, id).cooler, false);
 });
 
 // ── helpers ────────────────────────────────────────────────────────

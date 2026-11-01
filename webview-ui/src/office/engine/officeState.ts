@@ -237,6 +237,7 @@ export class OfficeState {
 
   /** Aero: a character leaves the floor on show, so its seat is free and it holds none. */
   releaseSeat(ch: Character): void {
+    if (this.aero.holdsBorrowed(ch)) this.aero.dropBorrowed(ch);
     if (ch.seatId && !this.aero.holdsBorrowed(ch)) {
       const seat = this.seats.get(ch.seatId);
       if (seat) seat.assigned = false;
@@ -445,9 +446,12 @@ export class OfficeState {
     const lent = new Set<number>();
     for (const ch of this.characters.values()) {
       // Aero: a seat lent to a subagent is let go (it asks for a station again), never made `assigned`, and none is given in its place.
-      if (this.aero.holdsBorrowed(ch)) {
+      if (ch.isSubagent && this.aero.routesSubagents()) {
+        // Aero places its subagents: none keeps a station, none gets or keeps a stock seat (all were just made free).
         this.aero.dropBorrowed(ch);
+        ch.seatId = null;
         lent.add(ch.id);
+        continue;
       }
       if (ch.seatId && this.seats.has(ch.seatId)) {
         const seat = this.seats.get(ch.seatId)!;

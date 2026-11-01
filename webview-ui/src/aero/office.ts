@@ -254,6 +254,19 @@ const noStation = (activity: Activity): StationState => ({
 
 /** The worker with every station field set (a person without them gets the defaults, in place). */
 function fill(w: Worker | Person): Worker {
+  const p = w as Partial<Worker>;
+  // Complete (the usual case, and every worker the office makes): nothing is allocated.
+  if (
+    p.prop !== undefined &&
+    p.group !== undefined &&
+    p.faces !== undefined &&
+    p.heldAt !== undefined &&
+    p.idleAt !== undefined &&
+    p.cooler !== undefined &&
+    p.activity !== undefined
+  ) {
+    return w as Worker;
+  }
   const o = w as unknown as Record<string, unknown>;
   for (const [k, v] of Object.entries(noStation('type'))) if (o[k] === undefined) o[k] = v;
   return w as Worker;
@@ -440,6 +453,7 @@ export class AeroOffice {
         w.sitting = false;
         w.stranded = true;
       }
+      w.cooler = null;
       w.noBench = null;
     }
     this.borrowed.clear();
@@ -671,6 +685,14 @@ export class AeroOffice {
       if (seat && w.ch.id !== except) taken.add(key(seat.seatCol, seat.seatRow));
     }
     for (const [k, w] of this.props) if (w.ch.id !== except) taken.add(k);
+    // The water cooler tiles workers were sent to, reserved from the moment they are sent.
+    for (const w of this.subs.values()) {
+      if (w.cooler && w.ch.id !== except) taken.add(key(w.cooler.col, w.cooler.row));
+    }
+    for (const person of this.people) {
+      if (person.cooler && person.ch.id !== except)
+        taken.add(key(person.cooler.col, person.cooler.row));
+    }
     return taken;
   }
 
@@ -874,6 +896,12 @@ export class AeroOffice {
     this.syncing = true;
     try {
       const parked = this.parkOffFloor();
+      // What the floor that was left held is free before anyone returning is placed.
+      if (parked) {
+        for (const person of this.people) {
+          if (!this.personOnFloor(person)) this.releaseBench(person, false);
+        }
+      }
       this.snapReturningOnSwitch();
       const pods = getAeroUpdate()?.pods ?? null;
       if (pods !== this.podsApplied) {
@@ -1016,12 +1044,13 @@ export class AeroOffice {
     ch.tileRow = spot.row;
     this.stand(ch);
     // Handed to the router: it is at its station at once, as a lead is put on its seat.
+    // An idle one (between its turns) is not seated at work: it stands there until it works again.
     if (this.enabled() && lead.seatId) {
       const w = this.subWork(ch);
       this.releaseBench(w, false);
       w.stranded = false;
       w.noBench = null;
-      this.takeStation(w, lead, chainOf(w.activity), true);
+      if (ch.isActive) this.takeStation(w, lead, this.chainFor(w, lead), true);
     }
   }
 
@@ -1057,10 +1086,12 @@ export class AeroOffice {
       if (off && !was) {
         this.offFloor.add(ch.id);
         this.dropRoute(ch.id);
+        this.dropBorrowed(ch);
         os.releaseSeat(ch);
         changed = true;
       } else if (off && ch.seatId) {
         // A hidden character holds no seat, however it came by one (a seat pick, a teammate link).
+        this.dropBorrowed(ch);
         os.releaseSeat(ch);
         changed = true;
       } else if (!off && was) {
@@ -1474,6 +1505,16 @@ export class AeroOffice {
     return ch.seatId !== null && this.borrowed.get(ch.seatId)?.ch === ch;
   }
 
+  /** Whether Aero routes stock subagents to stations now (its update and the Lounge are there): the stock seat logic gives them none. */
+  routesSubagents(): boolean {
+    return this.enabled() !== null;
+  }
+
+  /** The station groups a worker tries for this lead. */
+  private chainFor(w: Worker, lead: Character): StationGroup[] {
+    return chainOf(w.activity, lead.directoryName === PR_RUNS_ROOM);
+  }
+
   /** The seat Aero lent `ch` is let go at once (a layout rebuild hands the stock code every seat afresh). */
   dropBorrowed(ch: Character): void {
     const w = this.subs.get(ch.id);
@@ -1570,7 +1611,14 @@ export class AeroOffice {
     const ch = w.ch;
     const from = os.characters.get(subId);
     if (from && from !== ch) this.mirror(w, from);
-    w.activity = this.subActivity.get(subId) ?? w.activity;
+    // A type that arrives after the spawn (the hook's start can come ticks after the transcript's) makes it look again at once.
+    const kind = this.subActivity.get(subId);
+    const changed = kind !== undefined && kind !== w.activity;
+    if (kind !== undefined) w.activity = kind;
+    if (changed) {
+      w.noBench = null;
+      w.heldAt = this.clock - HOLD_SEC;
+    }
     ch.aeroReading = readsAt(w.activity);
     const meta = os.subagentMeta.get(subId);
     const lead = meta ? os.characters.get(meta.parentAgentId) : undefined;
@@ -1582,6 +1630,10 @@ export class AeroOffice {
     }
     const permission = ch.bubbleType === 'permission';
     const idle = !ch.isActive && !permission;
+    if (changed && holding() && w.group !== null && !this.chainFor(w, lead).includes(w.group)) {
+      this.releaseBench(w, false);
+      w.stranded = false;
+    }
     if (idle) w.idleAt ??= this.clock;
     else w.idleAt = null;
     if (w.bench !== null) {
@@ -1601,7 +1653,7 @@ export class AeroOffice {
       if (idle && held && w.idleAt !== null && this.clock - w.idleAt >= IDLE_RELEASE_SEC) {
         this.goToCooler(w, lead);
       } else if (!idle && !permission && held) {
-        const chain = chainOf(w.activity);
+        const chain = this.chainFor(w, lead);
         const better = chain.slice(0, Math.max(0, chain.indexOf(w.group ?? chain[0])));
         if (better.length > 0 && this.takeStation(w, lead, better)) w.stranded = false;
       }
@@ -1609,7 +1661,7 @@ export class AeroOffice {
     }
     if (idle) return;
     w.cooler = null;
-    if (this.takeStation(w, lead, chainOf(w.activity))) w.stranded = false;
+    if (this.takeStation(w, lead, this.chainFor(w, lead))) w.stranded = false;
     // No station for a worker that was sitting on one it no longer holds: it may not stay on a tile it doesn't own.
     else if (w.stranded) this.standAside(w);
   }
@@ -1800,6 +1852,11 @@ export class AeroOffice {
     const at = this.tileOf(w);
     if (at === null) {
       step();
+      // Working with no station to be had: it stands there, facing down, not sunk into the floor as a sitter is.
+      if (ch.isActive && ch.state === CharacterState.TYPE && ch.seatId === null) {
+        ch.aeroStanding = true;
+        ch.dir = Direction.DOWN;
+      }
       return;
     }
     if (ch.state === CharacterState.WALK) {
@@ -1830,10 +1887,13 @@ export class AeroOffice {
   /** The worker has not worked for a while: it lets go of its station and walks to the lead's pod's water cooler (else it just gets up). */
   private goToCooler(w: Worker, lead: Character): void {
     const ch = w.ch;
+    const coolers = this.candidates('cooler', lead);
+    const taken = this.occupied(ch.id);
+    const spot = coolers.find((c) => !taken.has(key(c.col, c.row)));
+    // Every cooler tile of the pod is taken or reserved: it stays on its station and asks again.
+    if (!spot && coolers.length > 0) return;
     this.releaseBench(w, false);
     w.stranded = false;
-    const taken = this.occupied(ch.id);
-    const spot = this.candidates('cooler', lead).find((c) => !taken.has(key(c.col, c.row)));
     if (spot) {
       const at = ch.tileCol === spot.col && ch.tileRow === spot.row;
       const path = at ? [] : this.pathTo(ch, spot);
@@ -2000,7 +2060,7 @@ export class AeroOffice {
     // A free station (a PC bench of the lead's pod, else the next tier of its activity), else the free tile nearest its desk (the lead's
     // seat, not wherever the lead stands now: a lead resting in the Lounge is not where the work is).
     person.noBench = null;
-    if (this.takeStation(person, lead, chainOf(person.activity))) return true;
+    if (this.takeStation(person, lead, this.chainFor(fill(person), lead))) return true;
     // No bench: it stops what it was doing (a trip home, a walk to the lift) before it is routed, and stands if it cannot be.
     this.stand(ch);
     const taken = this.occupied(Number.NaN);
@@ -2321,7 +2381,8 @@ export class AeroOffice {
             hidden: c.aeroHidden === true,
             seat: w?.bench ?? null,
             stand: w ? this.standTile(w) : null,
-            activity: w && (w.bench !== null || w.prop !== null) ? w.activity : null,
+            activity: w?.activity ?? this.subActivity.get(c.id) ?? 'type',
+            station: w !== undefined && (w.bench !== null || w.prop !== null),
             cooler: w?.cooler !== null && w?.cooler !== undefined,
           };
         }),
@@ -2419,8 +2480,10 @@ export interface AeroSnapshot {
     seat: string | null;
     /** The tile it stands at before a prop, or null. */
     stand: Tile | null;
-    /** What it does at its station, or null when it holds none. */
-    activity: Activity | null;
+    /** What it does, from its type (whether or not it holds a station now). */
+    activity: Activity;
+    /** Whether it holds a station now. */
+    station: boolean;
     /** Sent to the pod's water cooler. */
     cooler: boolean;
   }>;
