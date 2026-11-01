@@ -5,7 +5,6 @@ import {
   AUTO_ON_SIDE_DEPTH,
   CHARACTER_HIT_HALF_WIDTH,
   CHARACTER_HIT_HEIGHT,
-  CHARACTER_SITTING_OFFSET_PX,
   DISMISS_BUBBLE_FAST_FADE_SEC,
   FURNITURE_ANIM_INTERVAL_SEC,
   GREETER_ID,
@@ -39,7 +38,7 @@ import type {
   TileType as TileTypeVal,
 } from '../types.js';
 import { CharacterState, Direction, PetState, TILE_SIZE } from '../types.js';
-import { createCharacter, updateCharacter } from './characters.js';
+import { createCharacter, sittingOffsetPx, updateCharacter } from './characters.js';
 import { advanceMatrixEffect, startMatrixEffect } from './matrixEffectState.js';
 import { createPet, updatePet } from './petEntity.js';
 import { anchorTile, closestFreeSeat } from './seatPlacement.js';
@@ -238,7 +237,7 @@ export class OfficeState {
 
   /** Aero: a character leaves the floor on show, so its seat is free and it holds none. */
   releaseSeat(ch: Character): void {
-    if (ch.seatId) {
+    if (ch.seatId && !this.aero.holdsBorrowed(ch)) {
       const seat = this.seats.get(ch.seatId);
       if (seat) seat.assigned = false;
     }
@@ -443,7 +442,13 @@ export class OfficeState {
     this.aero.holdFrontDesk();
 
     // First pass: try to keep characters at their existing seats
+    const lent = new Set<number>();
     for (const ch of this.characters.values()) {
+      // Aero: a seat lent to a subagent is let go (it asks for a station again), never made `assigned`, and none is given in its place.
+      if (this.aero.holdsBorrowed(ch)) {
+        this.aero.dropBorrowed(ch);
+        lent.add(ch.id);
+      }
       if (ch.seatId && this.seats.has(ch.seatId)) {
         const seat = this.seats.get(ch.seatId)!;
         if (!seat.assigned) {
@@ -478,7 +483,7 @@ export class OfficeState {
 
     // Second pass: assign remaining characters to free seats
     for (const ch of this.characters.values()) {
-      if (ch.seatId || this.aero.isOffFloor(ch.id)) continue;
+      if (ch.seatId || lent.has(ch.id) || this.aero.isOffFloor(ch.id)) continue;
       const seatId = this.findFreeSeat(ch.directoryName);
       if (seatId) {
         this.seats.get(seatId)!.assigned = true;
@@ -1104,8 +1109,7 @@ export class OfficeState {
     ch.y = spawn.row * TILE_SIZE + TILE_SIZE / 2;
     ch.tileCol = spawn.col;
     ch.tileRow = spawn.row;
-    // Face the same direction as the parent agent
-    if (parentCh) ch.dir = parentCh.dir;
+    // Aero: it faces what it works at (its station's seat or prop), not the way its lead faces.
     ch.isSubagent = true;
     ch.parentAgentId = parentAgentId;
     startMatrixEffect(ch, 'spawn');
@@ -1130,7 +1134,8 @@ export class OfficeState {
         this.subagentMeta.delete(id);
         return;
       }
-      if (ch.seatId) {
+      // Aero: a seat Aero lent it was never `assigned` and may be somebody's by now.
+      if (ch.seatId && !this.aero.holdsBorrowed(ch)) {
         const seat = this.seats.get(ch.seatId);
         if (seat) seat.assigned = false;
       }
@@ -1159,7 +1164,7 @@ export class OfficeState {
             toRemove.push(key);
             continue;
           }
-          if (ch.seatId) {
+          if (ch.seatId && !this.aero.holdsBorrowed(ch)) {
             const seat = this.seats.get(ch.seatId);
             if (seat) seat.assigned = false;
           }
@@ -1591,8 +1596,7 @@ export class OfficeState {
       if (this.aero.hides(ch)) continue;
       // Character sprite is 16x24, anchored bottom-center
       // Apply sitting offset to match visual position
-      const sittingOffset = ch.state === CharacterState.TYPE ? CHARACTER_SITTING_OFFSET_PX : 0;
-      const anchorY = ch.y + sittingOffset;
+      const anchorY = ch.y + sittingOffsetPx(ch);
       const left = ch.x - CHARACTER_HIT_HALF_WIDTH;
       const right = ch.x + CHARACTER_HIT_HALF_WIDTH;
       const top = anchorY - CHARACTER_HIT_HEIGHT;

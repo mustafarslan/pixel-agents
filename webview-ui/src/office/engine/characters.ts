@@ -1,4 +1,5 @@
 import {
+  CHARACTER_SITTING_OFFSET_PX,
   DEFAULT_MAX_CONTEXT_TOKENS,
   SEAT_REST_MAX_SEC,
   SEAT_REST_MIN_SEC,
@@ -21,6 +22,16 @@ import { CharacterState, Direction, TILE_SIZE } from '../types.js';
 export function isReadingTool(tool: string | null): boolean {
   if (!tool) return false;
   return isReadingToolName(tool);
+}
+
+/**
+ * How far a character is drawn (and hit) below its tile centre: 6 px while it sits at a desk. Aero: one standing at a prop (a
+ * bookshelf, the whiteboard) has `aeroStanding` and is not lowered; every other character is as it was.
+ */
+export function sittingOffsetPx(ch: Character): number {
+  return ch.state === CharacterState.TYPE && ch.aeroStanding !== true
+    ? CHARACTER_SITTING_OFFSET_PX
+    : 0;
 }
 
 /** Pixel center of a tile */
@@ -320,7 +331,8 @@ export function updateCharacter(
 export function getCharacterSprite(ch: Character, sprites: CharacterSprites): SpriteData {
   switch (ch.state) {
     case CharacterState.TYPE:
-      if (isReadingTool(ch.currentTool)) {
+      // Aero: a subagent's type, not its tool, says whether it reads (`aeroReading` is set); else the tool does.
+      if (ch.aeroReading ?? isReadingTool(ch.currentTool)) {
         return sprites.reading[ch.dir][ch.frame % 2];
       }
       return sprites.typing[ch.dir][ch.frame % 2];

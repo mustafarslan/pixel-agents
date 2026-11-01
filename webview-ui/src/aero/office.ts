@@ -17,6 +17,14 @@ import { findPath } from '../office/layout/tileMap.js';
 import { getLoadedCharacterCount } from '../office/sprites/spriteData.js';
 import type { Character, Seat } from '../office/types.js';
 import { CharacterState, Direction, TILE_SIZE } from '../office/types.js';
+import {
+  type Activity,
+  ACTIVITY_BUBBLE,
+  activityOf,
+  chainOf,
+  PERMISSION_BUBBLE,
+  readsAt,
+} from './activity.js';
 import { Effects, type FxKind } from './effects.js';
 import {
   clockPlateRect,
@@ -30,6 +38,7 @@ import {
   whiteboardRect,
 } from './lounge.js';
 import { assignFirstNames, lookKey, pickLook, roleFromSlug } from './names.js';
+import { buildStations, type Station, type StationBook, type StationGroup } from './stations.js';
 import {
   type AeroFloor,
   type AeroPods,
@@ -139,6 +148,10 @@ const CHAT_SHOW_SEC = 3;
 const CHAT_LINES = ['...', 'hm', 'ha!', 'ok', 'so...', 'brb'];
 const ROUTE_RETRIES = 3;
 const CANDIDATES_TRIED = 8;
+/** A borrower keeps a station this many seconds (the tick clock) before it moves up to a better one or leaves it idle. */
+const HOLD_SEC = 8;
+/** A borrower that has not worked this long lets go of its station and goes to the water cooler. */
+const IDLE_RELEASE_SEC = 20;
 /** Where an effect's origin sits below the thing it plays on, in world pixels (the effects draw above their origin). */
 const FX_BURST_DROP = 15;
 const FX_COUNTDOWN_DROP = 0;
@@ -193,26 +206,78 @@ export interface Route {
   tries: number;
 }
 
-export interface Person {
+/**
+ * What a character that borrows a station has: the stock subagents, the people and the contractors. A station is a seat (`bench`, in
+ * `borrowed`) or a prop front tile (`prop`, in `props`); never `seat.assigned`.
+ */
+export interface Worker {
+  ch: Character;
+  /** The seat it holds (borrowed, never `assigned`), or null. */
+  bench: string | null;
+  /** The tile it stands at before a prop (a bookshelf, the whiteboard), as `col,row`, or null. */
+  prop: string | null;
+  /** The group of the station it holds. */
+  group: StationGroup | null;
+  /** Which way it faces at its station. */
+  faces: Direction;
+  /** Whether it was sitting (working) at the last look (the PC it faces follows). */
+  sitting: boolean;
+  /** Its station was let go without it getting up (its floor left, or the layout was rebuilt): it stands up when it is next looked after. */
+  stranded: boolean;
+  /** What the world looked like when no station was found for it: no new search until that changes (see `benchSignature`). */
+  noBench: string | null;
+  /** The tick clock when it took its station. */
+  heldAt: number;
+  /** The tick clock when it stopped working (and no permission waits), or null while it works. */
+  idleAt: number | null;
+  /** The water cooler tile it was sent to while idle, or null. */
+  cooler: Tile | null;
+  /** What it does, by its type. */
+  activity: Activity;
+}
+
+type StationState = Omit<Worker, 'ch'>;
+
+const noStation = (activity: Activity): StationState => ({
+  bench: null,
+  prop: null,
+  group: null,
+  faces: Direction.DOWN,
+  sitting: false,
+  stranded: false,
+  noBench: null,
+  heldAt: 0,
+  idleAt: null,
+  cooler: null,
+  activity,
+});
+
+/** The worker with every station field set (a person without them gets the defaults, in place). */
+function fill(w: Worker | Person): Worker {
+  const o = w as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(noStation('type'))) if (o[k] === undefined) o[k] = v;
+  return w as Worker;
+}
+
+/** A stock subagent at work (one no person stands in for). */
+export interface SubWork extends Worker {
+  subId: number;
+}
+
+/** The fields a person may lack (a person made by hand, as a test does): `fill` gives them their defaults before any station code looks. */
+type StationExtras = 'prop' | 'group' | 'faces' | 'heldAt' | 'idleAt' | 'cooler' | 'activity';
+
+export interface Person extends Omit<Worker, StationExtras>, Partial<Pick<Worker, StationExtras>> {
   slug: string;
   /** The floor (the repo's floor id) a project agent is staff of, or null (the owner's agents, and the rooms' agents). */
   floor: string | null;
   /** The worktree room an agent of the Rooms style belongs to, or null (a floor's staff, and the owner's agents). */
   room: string | null;
   name: string;
-  ch: Character;
   /** The stock subagent character this one stands in for, while it is away. */
   subId: number | null;
   /** Walking home after an away trip: a poof when it gets there. */
   returning: boolean;
-  /** The pod bench it works on while away (borrowed, never `assigned`), or null. */
-  bench: string | null;
-  /** Whether it was sitting on that bench at the last look (the PC it faces follows). */
-  sitting: boolean;
-  /** Its bench was let go without it getting up (its floor left, or the layout was rebuilt): it stands up when it is next looked after. */
-  stranded: boolean;
-  /** What the world looked like when no bench was found for it: no new search until that changes (see `benchSignature`). */
-  noBench: string | null;
   /** Set on a contractor, hired for a floor whose people of the type were all busy; absent on a person. */
   contractor?: Contractor;
 }
@@ -289,8 +354,15 @@ export class AeroOffice {
   private offFloor = new Set<number>();
   private syncing = false;
 
-  /** The pod benches people work on: seat uid to the person on it. Never `seat.assigned`. */
-  private borrowed = new Map<string, Person>();
+  /** The seats workers (people and stock subagents) work on: seat uid to the worker on it. Never `seat.assigned`. */
+  private borrowed = new Map<string, Worker>();
+  /** The prop front tiles workers stand at, `col,row` to the worker. */
+  private props = new Map<string, Worker>();
+  /** The stock subagents at work, by character id. */
+  private subs = new Map<number, SubWork>();
+  /** What each stock subagent does, by its type (set when its start names one). */
+  private subActivity = new Map<number, Activity>();
+  private book: StationBook | null = null;
   private queued: QueuedSubagent[] = [];
 
   private cachedLayout: unknown = null;
@@ -354,16 +426,24 @@ export class AeroOffice {
         return Array.from({ length: w }, (_, i) => ({ col: f.col + i, row: f.row }));
       })
       .filter((t) => !blocked.has(key(t.col, t.row)));
-    // The seats are new: borrowed benches are let go, and taken again by the tick.
-    for (const person of this.people) {
-      if (person.bench !== null) {
-        person.ch.seatId = null;
-        person.bench = null;
-        person.sitting = false;
-        person.stranded = true;
+    this.book = buildStations(os);
+    // The seats are new: borrowed stations are let go, and taken again by the tick.
+    for (const loose of [...this.people, ...this.subs.values()]) {
+      const w = fill(loose);
+      if (w.bench !== null || w.prop !== null) {
+        // Only the seat Aero lent: after a rebuild the stock code may have given a stock subagent one of its own.
+        if (this.holdsBorrowed(w.ch)) w.ch.seatId = null;
+        w.ch.aeroStanding = false;
+        w.bench = null;
+        w.prop = null;
+        w.group = null;
+        w.sitting = false;
+        w.stranded = true;
       }
+      w.noBench = null;
     }
     this.borrowed.clear();
+    this.props.clear();
     this.os.refreshFurniture();
     this.rehomePeople();
   }
@@ -450,12 +530,22 @@ export class AeroOffice {
     this.refresh();
     // Not on the floor on show: it stands where it is, unseen, until its floor is back.
     if (this.offFloor.has(ch.id)) {
+      const w = this.subs.get(ch.id);
+      if (w) this.releaseBench(w, false);
       this.leave(ch);
       return;
     }
     const update = this.enabled();
     if (ch.isSubagent || !update) {
       this.leave(ch);
+      // A stock subagent at work borrows a station and faces it; one a person stands in for is hidden and stays as it is.
+      if (ch.isSubagent && update && !ch.aeroHidden && this.os.subagentMeta.has(ch.id)) {
+        const w = this.subWork(ch);
+        this.tendWorker(w, ch.id);
+        this.stepWorker(w, step);
+        if (w.bench !== null) this.watchSitting(w);
+        return;
+      }
       step();
       return;
     }
@@ -575,6 +665,12 @@ export class AeroOffice {
     for (const [id, route] of this.routes) {
       if (id !== except) taken.add(key(route.target.col, route.target.row));
     }
+    // The stations the borrowers hold, or are walking to.
+    for (const [uid, w] of this.borrowed) {
+      const seat = this.os.seats.get(uid);
+      if (seat && w.ch.id !== except) taken.add(key(seat.seatCol, seat.seatRow));
+    }
+    for (const [k, w] of this.props) if (w.ch.id !== except) taken.add(k);
     return taken;
   }
 
@@ -919,6 +1015,14 @@ export class AeroOffice {
     ch.tileCol = spot.col;
     ch.tileRow = spot.row;
     this.stand(ch);
+    // Handed to the router: it is at its station at once, as a lead is put on its seat.
+    if (this.enabled() && lead.seatId) {
+      const w = this.subWork(ch);
+      this.releaseBench(w, false);
+      w.stranded = false;
+      w.noBench = null;
+      this.takeStation(w, lead, chainOf(w.activity), true);
+    }
   }
 
   /** Whether any character is on another floor than the one on show. */
@@ -996,6 +1100,7 @@ export class AeroOffice {
     for (const id of [...this.failed.keys()]) {
       if (!this.os.characters.has(id)) this.failed.delete(id);
     }
+    this.sweepSubs();
     this.reconcilePeople(update);
     this.matchQueued();
     this.watchUpdate(update);
@@ -1115,10 +1220,7 @@ export class AeroOffice {
         ch,
         subId: null,
         returning: false,
-        bench: null,
-        sitting: false,
-        stranded: false,
-        noBench: null,
+        ...noStation(activityOf(agent.slug)),
       });
     }
   }
@@ -1186,6 +1288,9 @@ export class AeroOffice {
       const visible = this.personOnFloor(person);
       this.releaseBench(person, false);
       ch.isActive = false;
+      ch.bubbleType = null;
+      ch.aeroReading = undefined;
+      person.cooler = null;
       const spot = this.freeLoungeTile(person, person);
       ch.state = CharacterState.IDLE;
       ch.wanderTimer = 0.5;
@@ -1214,10 +1319,14 @@ export class AeroOffice {
       this.releaseBench(person, false);
       return;
     }
-    if (person.subId !== null) this.tendBench(person);
-    // Home it wanders over the Lounge floor only; away it is active and types where it stopped.
+    // Home it wanders over the Lounge floor only; away it works at a station, else types where it stopped.
     const walkable = person.subId === null ? this.loungeWalkable : os.walkableTiles;
-    updateCharacter(ch, dt, walkable, os.seats, os.tileMap, os.blockedTiles);
+    const step = (): void =>
+      updateCharacter(ch, dt, walkable, os.seats, os.tileMap, os.blockedTiles);
+    if (person.subId !== null) {
+      this.tendWorker(person, person.subId);
+      this.stepWorker(person, step);
+    } else step();
     if (person.bench !== null) this.watchSitting(person);
     // Home again: a poof where the trip ends.
     if (person.returning && ch.state !== CharacterState.WALK) {
@@ -1341,53 +1450,91 @@ export class AeroOffice {
       ch,
       subId: null,
       returning: false,
-      bench: null,
-      sitting: false,
-      stranded: false,
-      noBench: null,
+      ...noStation(activityOf(type)),
       contractor: { number, idle: 0, leaving: false },
     };
     this.people.push(person);
     return person;
   }
 
-  // ── Benches ──────────────────────────────────────────────────────
+  // ── Stations ─────────────────────────────────────────────────────
 
-  /** Seat uids of the benches active people sit on, for the PCs they face (the office turns those on). */
+  /** Seat uids of the benches active workers sit on, for the PCs they face (the office turns those on). */
   activeBenchSeats(): Seat[] {
     const seats: Seat[] = [];
-    for (const [uid, person] of this.borrowed) {
+    for (const [uid, w] of this.borrowed) {
       const seat = this.os.seats.get(uid);
-      if (seat && person.ch.isActive && person.ch.state === CharacterState.TYPE) seats.push(seat);
+      if (seat && w.ch.isActive && w.ch.state === CharacterState.TYPE) seats.push(seat);
     }
     return seats;
   }
 
-  /** The PC a person faces follows whether it is sitting: the office rebuilds its furniture when that changes. */
-  private watchSitting(person: Person): void {
-    const sitting = person.ch.state === CharacterState.TYPE;
-    if (sitting === person.sitting) return;
-    person.sitting = sitting;
+  /** Whether `ch` sits on a seat Aero lent it (the stock code leaves such a seat's `assigned` alone). */
+  holdsBorrowed(ch: Character): boolean {
+    return ch.seatId !== null && this.borrowed.get(ch.seatId)?.ch === ch;
+  }
+
+  /** The seat Aero lent `ch` is let go at once (a layout rebuild hands the stock code every seat afresh). */
+  dropBorrowed(ch: Character): void {
+    const w = this.subs.get(ch.id);
+    if (w) this.releaseBench(w, false);
+  }
+
+  /** The PC a worker faces follows whether it is sitting at work: the office rebuilds its furniture when that changes. */
+  private watchSitting(loose: Worker | Person): void {
+    const w = fill(loose);
+    const sitting = w.ch.state === CharacterState.TYPE && w.ch.isActive;
+    if (sitting === w.sitting) return;
+    w.sitting = sitting;
     this.os.refreshFurniture();
   }
 
-  /** Lets go of the person's bench. `standUp`: it gets up and takes the nearest free tile; else it stays where it is (`stranded`). */
-  private releaseBench(person: Person, standUp: boolean): void {
-    if (person.bench === null) return;
-    this.borrowed.delete(person.bench);
-    person.bench = null;
-    person.ch.seatId = null;
-    const wasSitting = person.sitting;
-    person.sitting = false;
-    if (standUp) this.standAside(person);
-    else person.stranded = true;
-    if (wasSitting) this.os.refreshFurniture();
+  /** The stock subagent's record of work, made when it is first looked at. */
+  private subWork(ch: Character): SubWork {
+    let w = this.subs.get(ch.id);
+    if (!w) {
+      w = { ch, subId: ch.id, ...noStation(this.subActivity.get(ch.id) ?? 'type') };
+      this.subs.set(ch.id, w);
+    }
+    return w;
   }
 
-  /** The person gets up where it is and walks to the nearest free tile (or just stands when there is none it can reach). */
-  private standAside(person: Person): void {
-    const ch = person.ch;
-    person.stranded = false;
+  /** Forgets the stock subagents that are gone or leaving (a removed one despawns where it sits), and frees what they held. */
+  private sweepSubs(): void {
+    for (const [id, w] of this.subs) {
+      const ch = this.os.characters.get(id);
+      if (ch && ch.matrixEffect !== 'despawn' && this.os.subagentMeta.has(id) && !ch.aeroHidden)
+        continue;
+      this.releaseBench(w, false);
+      this.subs.delete(id);
+    }
+    for (const id of [...this.subActivity.keys()]) {
+      if (!this.os.characters.has(id)) this.subActivity.delete(id);
+    }
+  }
+
+  /** Lets go of the worker's station. `standUp`: it gets up and takes the nearest free tile; else it stays where it is (`stranded`). */
+  private releaseBench(loose: Worker | Person, standUp: boolean): void {
+    const w = fill(loose);
+    if (w.bench === null && w.prop === null) return;
+    const hadSeat = w.bench !== null;
+    if (w.bench !== null && this.borrowed.get(w.bench) === w) this.borrowed.delete(w.bench);
+    if (w.prop !== null && this.props.get(w.prop) === w) this.props.delete(w.prop);
+    w.bench = null;
+    w.prop = null;
+    w.group = null;
+    w.ch.seatId = null;
+    w.ch.aeroStanding = false;
+    w.sitting = false;
+    if (standUp) this.standAside(w);
+    else w.stranded = true;
+    if (hadSeat) this.os.refreshFurniture();
+  }
+
+  /** The worker gets up where it is and walks to the nearest free tile (or just stands when there is none it can reach). */
+  private standAside(w: Worker): void {
+    const ch = w.ch;
+    w.stranded = false;
     const spot = this.nearestFreeTile(ch);
     ch.state = CharacterState.IDLE;
     ch.frame = 0;
@@ -1403,33 +1550,73 @@ export class AeroOffice {
     }
   }
 
-  /** Keeps a working person's bench honest: gone when somebody was seated on it or the lead's pod changed, taken when one is free. */
-  private tendBench(person: Person): void {
-    const os = this.os;
-    const meta = person.subId === null ? undefined : os.subagentMeta.get(person.subId);
-    const lead = meta ? os.characters.get(meta.parentAgentId) : undefined;
-    if (!lead || !lead.seatId) {
-      // Nothing to sit beside: a person that lost its bench still gets up.
-      if (person.bench === null && person.stranded) this.standAside(person);
-      return;
-    }
-    if (person.bench !== null) {
-      const seat = os.seats.get(person.bench);
-      const zone = os.seatZone(lead.seatId);
-      if (!seat || seat.assigned || (zone !== null && os.seatZone(person.bench) !== zone)) {
-        this.releaseBench(person, true);
-      }
-    }
-    if (person.bench === null) {
-      if (this.takeBench(person, lead.seatId)) person.stranded = false;
-      // No bench for a person that was sitting on one it no longer holds: it may not stay on a tile it doesn't own.
-      else if (person.stranded) this.standAside(person);
-    }
+  /** The stock subagent a person stands in for, or the person's own character when it is the worker itself. */
+  private mirror(w: Worker, from: Character): void {
+    const ch = w.ch;
+    ch.isActive = from.isActive;
+    ch.bubbleType = from.bubbleType;
+    ch.waitingAwaitingInput = from.waitingAwaitingInput;
+    ch.bubbleTimer = from.bubbleTimer;
   }
 
-  /** What decides whether a bench search can find something new: the seats taken, the benches borrowed, the routes, the lead's seat. */
+  /**
+   * Keeps a worker's station honest, once a tick: mirrors the stock subagent a person stands in for; gone when somebody was seated on
+   * the seat, or (for a pod PC bench) the lead's pod changed; held while it waits for permission; given up for the water cooler after
+   * it has not worked for a while; moved up to a better one once its hold is over; taken when it works and holds none.
+   */
+  private tendWorker(loose: Worker | Person, subId: number): void {
+    const w = fill(loose);
+    const os = this.os;
+    const ch = w.ch;
+    const from = os.characters.get(subId);
+    if (from && from !== ch) this.mirror(w, from);
+    w.activity = this.subActivity.get(subId) ?? w.activity;
+    ch.aeroReading = readsAt(w.activity);
+    const meta = os.subagentMeta.get(subId);
+    const lead = meta ? os.characters.get(meta.parentAgentId) : undefined;
+    const holding = (): boolean => w.bench !== null || w.prop !== null;
+    if (!lead || !lead.seatId) {
+      // Nothing to sit beside: a worker that lost its station still gets up.
+      if (!holding() && w.stranded) this.standAside(w);
+      return;
+    }
+    const permission = ch.bubbleType === 'permission';
+    const idle = !ch.isActive && !permission;
+    if (idle) w.idleAt ??= this.clock;
+    else w.idleAt = null;
+    if (w.bench !== null) {
+      const seat = os.seats.get(w.bench);
+      const zone = os.seatZone(lead.seatId);
+      // A pod PC bench is the lead's pod's; a seat anywhere else is not zone-checked.
+      if (
+        !seat ||
+        seat.assigned ||
+        (w.group === 'pc' && zone !== null && os.seatZone(w.bench) !== zone)
+      ) {
+        this.releaseBench(w, true);
+      }
+    }
+    if (holding()) {
+      const held = this.clock - w.heldAt >= HOLD_SEC;
+      if (idle && held && w.idleAt !== null && this.clock - w.idleAt >= IDLE_RELEASE_SEC) {
+        this.goToCooler(w, lead);
+      } else if (!idle && !permission && held) {
+        const chain = chainOf(w.activity);
+        const better = chain.slice(0, Math.max(0, chain.indexOf(w.group ?? chain[0])));
+        if (better.length > 0 && this.takeStation(w, lead, better)) w.stranded = false;
+      }
+      return;
+    }
+    if (idle) return;
+    w.cooler = null;
+    if (this.takeStation(w, lead, chainOf(w.activity))) w.stranded = false;
+    // No station for a worker that was sitting on one it no longer holds: it may not stay on a tile it doesn't own.
+    else if (w.stranded) this.standAside(w);
+  }
+
+  /** What decides whether a station search can find something new: the seats taken, the stations borrowed, the routes, the lead's seat. */
   private benchSignature(leadSeatId: string): string {
-    let h = this.borrowed.size;
+    let h = this.borrowed.size + this.props.size * 1000;
     let i = 0;
     for (const seat of this.os.seats.values()) {
       i++;
@@ -1438,38 +1625,231 @@ export class AeroOffice {
     return `${leadSeatId}|${h}|${this.occupancy}|${this.os.seats.size}`;
   }
 
-  /** Walks the person to the nearest free wooden bench of the lead's pod facing a PC; false when there is none it can reach. */
-  private takeBench(person: Person, leadSeatId: string): boolean {
+  /** The stations of `group` the lead's worker may take, nearest the lead's seat first. */
+  private candidates(group: StationGroup, lead: Character): Station[] {
     const os = this.os;
-    const ch = person.ch;
-    const signature = this.benchSignature(leadSeatId);
-    if (person.noBench === signature) return false;
-    for (const uid of os.benchSeatsFor(leadSeatId, this.borrowed)) {
-      const seat = os.seats.get(uid);
-      if (!seat) continue;
-      const at = ch.tileCol === seat.seatCol && ch.tileRow === seat.seatRow;
-      const path = at ? [] : this.pathTo(ch, { col: seat.seatCol, row: seat.seatRow });
-      if (!at && path.length === 0) continue;
-      this.borrowed.set(uid, person);
-      person.bench = uid;
-      ch.seatId = uid;
-      ch.isActive = true;
-      if (at) {
-        this.stand(ch);
-        ch.state = CharacterState.TYPE;
-        ch.dir = seat.facingDir;
-      } else {
-        ch.path = path;
-        ch.moveProgress = 0;
-        ch.state = CharacterState.WALK;
-        ch.frame = 0;
-        ch.frameTimer = 0;
-      }
-      person.noBench = null;
-      return true;
+    const book = this.book;
+    const anchor = lead.seatId ? os.seats.get(lead.seatId) : undefined;
+    if (!book || !lead.seatId || !anchor) return [];
+    const zone = os.seatZone(lead.seatId);
+    const seatFree = (s: Station): boolean => {
+      const seat = os.seats.get(s.key);
+      return seat !== undefined && !seat.assigned && !this.borrowed.has(s.key);
+    };
+    let list: Station[];
+    switch (group) {
+      case 'pc':
+        // The wooden benches of the lead's pod that face a PC, nearest first.
+        return os.benchSeatsFor(lead.seatId, this.borrowed).flatMap((uid) => {
+          const seat = os.seats.get(uid);
+          return seat
+            ? [
+                {
+                  group,
+                  key: uid,
+                  seat: uid,
+                  col: seat.seatCol,
+                  row: seat.seatRow,
+                  dir: seat.facingDir,
+                },
+              ]
+            : [];
+        });
+      case 'whiteboard':
+        list = book.boards.filter((b) => b.zone === zone);
+        break;
+      case 'shelf':
+        list = book.shelves;
+        break;
+      case 'cooler':
+        list = book.coolers.filter((b) => b.zone === zone);
+        break;
+      default:
+        list = book.seats.filter((s) => s.group === group);
     }
-    person.noBench = signature;
+    return list
+      .filter((s) => (s.seat === null ? !this.props.has(s.key) : seatFree(s)))
+      .map((s) => {
+        const seat = s.seat === null ? undefined : os.seats.get(s.seat);
+        const at = seat ? { col: seat.seatCol, row: seat.seatRow } : s;
+        return { s, d: Math.abs(at.col - anchor.seatCol) + Math.abs(at.row - anchor.seatRow) };
+      })
+      .sort((a, b) => a.d - b.d || (a.s.key < b.s.key ? -1 : 1))
+      .map(({ s }) => (s.seat !== null ? { ...s, dir: os.seats.get(s.seat)!.facingDir } : s));
+  }
+
+  /**
+   * Takes the first free station of `groups`, in order, nearest first, that the worker can reach (at most `CANDIDATES_TRIED` path
+   * searches; none again until the world changes, see `benchSignature`). It walks there, or, with `snap`, is put there at once. A
+   * station it already holds is let go once the new one is chosen. False when there is none.
+   */
+  private takeStation(
+    loose: Worker | Person,
+    lead: Character,
+    groups: StationGroup[],
+    snap = false,
+  ): boolean {
+    const w = fill(loose);
+    const ch = w.ch;
+    if (!lead.seatId) return false;
+    const signature = `${this.benchSignature(lead.seatId)}|${groups.join()}|${w.group ?? ''}`;
+    if (w.noBench === signature) return false;
+    const taken = this.occupied(ch.id);
+    let searches = 0;
+    for (const group of groups) {
+      for (const st of this.candidates(group, lead)) {
+        if (st.seat === null && taken.has(st.key)) continue;
+        const at = ch.tileCol === st.col && ch.tileRow === st.row;
+        let path: Tile[] = [];
+        if (!at && !snap) {
+          if (searches >= CANDIDATES_TRIED) {
+            w.noBench = signature;
+            return false;
+          }
+          searches++;
+          path = this.pathTo(ch, { col: st.col, row: st.row });
+          if (path.length === 0) continue;
+        }
+        this.assignStation(w, st);
+        if (at || snap) {
+          ch.tileCol = st.col;
+          ch.tileRow = st.row;
+          this.stand(ch);
+          this.pose(w);
+        } else {
+          ch.path = path;
+          ch.moveProgress = 0;
+          ch.state = CharacterState.WALK;
+          ch.frame = 0;
+          ch.frameTimer = 0;
+        }
+        w.noBench = null;
+        return true;
+      }
+    }
+    w.noBench = signature;
     return false;
+  }
+
+  /** The worker holds `st`: the one it held before is let go (where it is), the new one is borrowed. */
+  private assignStation(w: Worker, st: Station): void {
+    const ch = w.ch;
+    const wasSeat = w.bench !== null;
+    // A seat the stock code gave a stock subagent (a layout rebuild hands every character one) is given back.
+    if (ch.isSubagent && w.bench === null && w.prop === null && ch.seatId !== null) {
+      const own = this.os.seats.get(ch.seatId);
+      if (own && !this.borrowed.has(ch.seatId)) own.assigned = false;
+    }
+    if (w.bench !== null && this.borrowed.get(w.bench) === w) this.borrowed.delete(w.bench);
+    if (w.prop !== null && this.props.get(w.prop) === w) this.props.delete(w.prop);
+    w.bench = st.seat;
+    w.prop = st.seat === null ? st.key : null;
+    w.group = st.group;
+    w.faces = st.dir;
+    w.heldAt = this.clock;
+    w.cooler = null;
+    w.sitting = false;
+    ch.seatId = st.seat;
+    ch.aeroStanding = false;
+    if (st.seat !== null) this.borrowed.set(st.seat, w);
+    else this.props.set(st.key, w);
+    if (st.seat !== null || wasSeat) this.os.refreshFurniture();
+  }
+
+  /** At its station: it types or reads there, facing it. A prop is stood at, a seat sat on; a waiting or idle worker is still. */
+  private pose(w: Worker): void {
+    const ch = w.ch;
+    const seat = w.bench === null ? undefined : this.os.seats.get(w.bench);
+    const dir = seat ? seat.facingDir : w.faces;
+    if (ch.state !== CharacterState.TYPE) {
+      ch.frame = 0;
+      ch.frameTimer = 0;
+    }
+    ch.state = CharacterState.TYPE;
+    ch.dir = dir;
+    w.faces = dir;
+    ch.path = [];
+    ch.moveProgress = 0;
+    ch.aeroStanding = w.prop !== null;
+    ch.x = ch.tileCol * TILE_SIZE + TILE_SIZE / 2;
+    ch.y = ch.tileRow * TILE_SIZE + TILE_SIZE / 2;
+    if (!ch.isActive || ch.bubbleType === 'permission') ch.frame = 0;
+  }
+
+  /** The tile a worker walks to or stands at now: its station, or the water cooler it was sent to. */
+  private tileOf(w: Worker): Tile | null {
+    if (w.cooler) return w.cooler;
+    if (w.bench !== null) {
+      const seat = this.os.seats.get(w.bench);
+      return seat ? { col: seat.seatCol, row: seat.seatRow } : null;
+    }
+    if (w.prop !== null) {
+      const [col, row] = w.prop.split(',').map(Number);
+      return { col, row };
+    }
+    return null;
+  }
+
+  /**
+   * The worker's step. Without a station it is the stock one. With one it walks (the stock step), then stands or sits there facing it,
+   * still while it waits or is idle, animated by the stock step while it works.
+   */
+  private stepWorker(loose: Worker | Person, step: () => void): void {
+    const w = fill(loose);
+    const ch = w.ch;
+    const at = this.tileOf(w);
+    if (at === null) {
+      step();
+      return;
+    }
+    if (ch.state === CharacterState.WALK) {
+      step();
+      if (ch.state === CharacterState.WALK) return;
+    }
+    if (ch.tileCol !== at.col || ch.tileRow !== at.row) {
+      // The walk ended short of the station: once more, else it gives the station up.
+      if (!this.walkTo(ch, at)) {
+        if (w.cooler) w.cooler = null;
+        else this.releaseBench(w, true);
+      }
+      return;
+    }
+    if (w.cooler) {
+      ch.state = CharacterState.IDLE;
+      ch.dir = Direction.UP;
+      ch.frame = 0;
+      ch.path = [];
+      ch.x = at.col * TILE_SIZE + TILE_SIZE / 2;
+      ch.y = at.row * TILE_SIZE + TILE_SIZE / 2;
+      return;
+    }
+    this.pose(w);
+    if (ch.isActive && ch.bubbleType !== 'permission') step();
+  }
+
+  /** The worker has not worked for a while: it lets go of its station and walks to the lead's pod's water cooler (else it just gets up). */
+  private goToCooler(w: Worker, lead: Character): void {
+    const ch = w.ch;
+    this.releaseBench(w, false);
+    w.stranded = false;
+    const taken = this.occupied(ch.id);
+    const spot = this.candidates('cooler', lead).find((c) => !taken.has(key(c.col, c.row)));
+    if (spot) {
+      const at = ch.tileCol === spot.col && ch.tileRow === spot.row;
+      const path = at ? [] : this.pathTo(ch, spot);
+      if (at || path.length > 0) {
+        w.cooler = { col: spot.col, row: spot.row };
+        if (!at) {
+          ch.path = path;
+          ch.moveProgress = 0;
+          ch.state = CharacterState.WALK;
+          ch.frame = 0;
+          ch.frameTimer = 0;
+        }
+        return;
+      }
+    }
+    this.standAside(w);
   }
 
   private nearestFreeTile(
@@ -1525,6 +1905,8 @@ export class AeroOffice {
     if (type === null) return false;
     const lead = this.os.characters.get(parentId);
     if (!lead) return false;
+    const subId = this.os.getSubagentId(parentId, parentToolId);
+    if (subId !== null) this.subActivity.set(subId, activityOf(type));
     // Not yet matchable: its lead's floor is off, or the first update (and with it the people) hasn't come.
     if (!this.onFloor(lead) || !this.peopleReady()) {
       if (this.queued.length >= MAX_QUEUED) this.queued.shift();
@@ -1601,16 +1983,24 @@ export class AeroOffice {
     // Its last stand-in ended before the tick sent it home: it keeps the tile it stands on, and lets go of the bench.
     if (person.subId !== null) this.releaseBench(person, false);
     sub.aeroHidden = true;
+    // Its own record of work, if the stock subagent had one, is let go: the person works for it now.
+    const held = this.subs.get(subId);
+    if (held) {
+      this.releaseBench(held, false);
+      this.subs.delete(subId);
+    }
     person.subId = subId;
+    person.activity = activityOf(type);
     person.returning = false;
     person.stranded = false;
     const ch = person.ch;
     // A stand-in for a subagent of another floor is hidden with it: no poof.
     if (!hired && this.personOnFloor(person)) this.poofAt(ch);
     ch.isActive = true;
-    // A free bench at a PC of the lead's pod, else the free tile nearest its desk (the lead's seat, not wherever the lead stands now:
-    // a lead resting in the Lounge is not where the work is).
-    if (lead.seatId && this.takeBench(person, lead.seatId)) return true;
+    // A free station (a PC bench of the lead's pod, else the next tier of its activity), else the free tile nearest its desk (the lead's
+    // seat, not wherever the lead stands now: a lead resting in the Lounge is not where the work is).
+    person.noBench = null;
+    if (this.takeStation(person, lead, chainOf(person.activity))) return true;
     // No bench: it stops what it was doing (a trip home, a walk to the lift) before it is routed, and stands if it cannot be.
     this.stand(ch);
     const taken = this.occupied(Number.NaN);
@@ -1819,6 +2209,40 @@ export class AeroOffice {
     return labels;
   }
 
+  /** The tile a worker stands at before a prop, or null (it sits, or holds no station). */
+  private standTile(loose: Worker | Person): Tile | null {
+    const w = fill(loose);
+    if (w.prop === null) return null;
+    const [col, row] = w.prop.split(',').map(Number);
+    return { col, row };
+  }
+
+  /**
+   * The bubbles over workers, for the canvas: the activity of a worker at its station (from the fixed table only), and the dots over a
+   * person whose subagent waits for permission (the stock subagent's own dots are the tool overlay's).
+   */
+  workBubbles(): Array<{ ch: Character; text: string }> {
+    const out: Array<{ ch: Character; text: string }> = [];
+    const add = (w: Worker, person: boolean): void => {
+      const ch = w.ch;
+      if (ch.matrixEffect) return;
+      if (ch.bubbleType === 'permission') {
+        if (person) out.push({ ch, text: PERMISSION_BUBBLE });
+        return;
+      }
+      const at = w.bench !== null || w.prop !== null;
+      if (ch.bubbleType !== null || !ch.isActive || !at || ch.state !== CharacterState.TYPE) return;
+      out.push({ ch, text: ACTIVITY_BUBBLE[w.activity] });
+    };
+    for (const p of this.people) {
+      if (p.subId !== null && this.personOnFloor(p)) add(fill(p), true);
+    }
+    for (const w of this.subs.values()) {
+      if (!this.hides(w.ch)) add(w, false);
+    }
+    return out;
+  }
+
   /** What the `getAero` test hook shows. */
   snapshot(): AeroSnapshot {
     this.refresh();
@@ -1860,6 +2284,9 @@ export class AeroOffice {
         shown: this.personOnFloor(p),
         away: p.subId !== null,
         bench: p.bench,
+        stand: this.standTile(p),
+        dir: p.ch.dir,
+        activity: p.subId !== null ? (p.activity ?? null) : null,
         kind: p.contractor ? ('contractor' as const) : ('person' as const),
         number: p.contractor?.number ?? 0,
         idle: Math.floor(p.contractor?.idle ?? 0),
@@ -1878,7 +2305,26 @@ export class AeroOffice {
           active: c.isActive,
           directoryName: c.directoryName ?? null,
           shown: !this.hides(c),
+          dir: c.dir,
         })),
+      subagents: [...this.os.characters.values()]
+        .filter((c) => c.isSubagent)
+        .map((c) => {
+          const w = this.subs.get(c.id);
+          return {
+            id: c.id,
+            parent: this.os.subagentMeta.get(c.id)?.parentAgentId ?? null,
+            col: c.tileCol,
+            row: c.tileRow,
+            state: c.state,
+            dir: c.dir,
+            hidden: c.aeroHidden === true,
+            seat: w?.bench ?? null,
+            stand: w ? this.standTile(w) : null,
+            activity: w && (w.bench !== null || w.prop !== null) ? w.activity : null,
+            cooler: w?.cooler !== null && w?.cooler !== undefined,
+          };
+        }),
       hidden: [...this.os.characters.values()].filter((c) => c.aeroHidden).map((c) => c.id),
       fxStarted: { ...this.fx.started },
       badges: Object.fromEntries(this.badgeCounts()),
@@ -1927,8 +2373,13 @@ export interface AeroSnapshot {
     /** Drawn: on the floor on show (`personOnFloor`). */
     shown: boolean;
     away: boolean;
-    /** The pod bench it works on, or null. */
+    /** The seat it works on, or null. */
     bench: string | null;
+    /** The tile it stands at before a prop (a bookshelf, the whiteboard), or null. */
+    stand: Tile | null;
+    dir: number;
+    /** What it does, while it is away for a subagent; else null. */
+    activity: Activity | null;
     kind: 'person' | 'contractor';
     /** A contractor's number (its name's `#N`), 0 for a person. */
     number: number;
@@ -1952,6 +2403,26 @@ export interface AeroSnapshot {
     directoryName: string | null;
     /** Drawn: not a hidden stock subagent and on the floor on show. */
     shown: boolean;
+    dir: number;
+  }>;
+  /** Every stock subagent: where it works. */
+  subagents: Array<{
+    id: number;
+    parent: number | null;
+    col: number;
+    row: number;
+    state: string;
+    dir: number;
+    /** A person stands in for it. */
+    hidden: boolean;
+    /** The seat it works on, or null. */
+    seat: string | null;
+    /** The tile it stands at before a prop, or null. */
+    stand: Tile | null;
+    /** What it does at its station, or null when it holds none. */
+    activity: Activity | null;
+    /** Sent to the pod's water cooler. */
+    cooler: boolean;
   }>;
   hidden: number[];
   /** How many effects of each kind have started (counted, so a short one isn't missed by a poll). */

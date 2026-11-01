@@ -237,6 +237,10 @@ export interface Character {
   isGreeter?: boolean;
   /** A stock subagent that a configured Aero character stands in for: not drawn, not hit-tested, no label. */
   aeroHidden?: boolean;
+  /** Aero: standing at a prop (a bookshelf, the whiteboard): drawn without the sitting offset. */
+  aeroStanding?: boolean;
+  /** Aero: told by the subagent's type, not its tool: true reads, false types; absent leaves it to `currentTool`. */
+  aeroReading?: boolean;
 
   // -- Agent Teams --
   /** Team name this agent belongs to */

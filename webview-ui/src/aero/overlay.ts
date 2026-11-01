@@ -18,11 +18,10 @@ import {
   AERO_PLATE_BORDER,
   AERO_PLATE_FILL,
   AERO_PLATE_TEXT,
-  CHARACTER_SITTING_OFFSET_PX,
 } from '../constants.js';
+import { sittingOffsetPx } from '../office/engine/characters.js';
 import type { OfficeState } from '../office/engine/officeState.js';
 import type { Character } from '../office/types.js';
-import { CharacterState } from '../office/types.js';
 import { drawEffects } from './effects.js';
 import { fitCached } from './fit.js';
 import { drawFloorSign } from './floorSign.js';
@@ -36,8 +35,7 @@ const SPRITE_H = 24;
 
 /** The top-centre of a character's sprite, in world pixels. */
 export function spriteTop(ch: Character): { x: number; y: number } {
-  const sit = ch.state === CharacterState.TYPE ? CHARACTER_SITTING_OFFSET_PX : 0;
-  return { x: ch.x, y: ch.y + sit - SPRITE_H };
+  return { x: ch.x, y: ch.y + sittingOffsetPx(ch) - SPRITE_H };
 }
 
 function fontPx(zoom: number, worldPx: number): number {
@@ -250,6 +248,13 @@ export function drawAeroOverlay(
     const text = os.aero.bubbleFor(route);
     const ch = os.characters.get(route);
     if (!text || !ch || os.aero.hides(ch)) continue;
+    const top = spriteTop(ch);
+    const up = nameFor(os, labels, ch, show) === null ? 0 : lift;
+    drawBubble(ctx, text, offsetX + top.x * zoom, offsetY + (top.y - 1) * zoom - up, zoom);
+  }
+
+  // Workers: the activity over a subagent or person at its station, the dots over a person waiting for permission.
+  for (const { ch, text } of os.aero.workBubbles()) {
     const top = spriteTop(ch);
     const up = nameFor(os, labels, ch, show) === null ? 0 : lift;
     drawBubble(ctx, text, offsetX + top.x * zoom, offsetY + (top.y - 1) * zoom - up, zoom);

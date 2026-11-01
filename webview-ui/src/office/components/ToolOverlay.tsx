@@ -6,7 +6,6 @@ import {
   BUBBLE_FADE_DURATION_SEC,
   BUBBLE_SITTING_OFFSET_PX,
   BUBBLE_VERTICAL_OFFSET_PX,
-  CHARACTER_SITTING_OFFSET_PX,
   CONTEXT_CRITICAL_THRESHOLD,
   CONTEXT_DANGER_THRESHOLD,
   CONTEXT_GAUGE_BG,
@@ -25,6 +24,7 @@ import {
   TOOL_OVERLAY_VERTICAL_OFFSET,
 } from '../../constants.js';
 import type { SubagentCharacter } from '../../hooks/useExtensionMessages.js';
+import { sittingOffsetPx } from '../engine/characters.js';
 import type { OfficeState } from '../engine/officeState.js';
 import { overlayProjection } from '../projection.js';
 import { getCachedSprite } from '../sprites/spriteCache.js';
@@ -175,7 +175,10 @@ export function ToolOverlay({
             ch.bubbleType === 'permission' ? BUBBLE_PERMISSION_SPRITE : BUBBLE_WAITING_SPRITE,
             zoom,
           );
-          const bubbleSittingOff = ch.state === CharacterState.TYPE ? BUBBLE_SITTING_OFFSET_PX : 0;
+          const bubbleSittingOff =
+            ch.state === CharacterState.TYPE && ch.aeroStanding !== true
+              ? BUBBLE_SITTING_OFFSET_PX
+              : 0;
           const alpha =
             ch.bubbleType === 'waiting' && ch.bubbleTimer < BUBBLE_FADE_DURATION_SEC
               ? ch.bubbleTimer / BUBBLE_FADE_DURATION_SEC
@@ -214,7 +217,7 @@ export function ToolOverlay({
         }
 
         // Position above character
-        const sittingOffset = ch.state === CharacterState.TYPE ? CHARACTER_SITTING_OFFSET_PX : 0;
+        const sittingOffset = sittingOffsetPx(ch);
         const screenX = project.toScreenX(ch.x);
         const screenY = project.toScreenY(ch.y + sittingOffset - TOOL_OVERLAY_VERTICAL_OFFSET);
 
