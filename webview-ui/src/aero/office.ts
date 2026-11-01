@@ -543,15 +543,17 @@ export class AeroOffice {
     this.stand(ch);
   }
 
-  private occupied(except: number): Set<string> {
+  private occupied(except: number, withPeople = true): Set<string> {
     const taken = new Set<string>();
     for (const other of this.os.characters.values()) {
       if (other.id !== except && !this.offFloor.has(other.id)) {
         taken.add(key(other.tileCol, other.tileRow));
       }
     }
-    for (const person of this.people) {
-      if (this.personOnFloor(person)) taken.add(key(person.ch.tileCol, person.ch.tileRow));
+    if (withPeople) {
+      for (const person of this.people) {
+        if (this.personOnFloor(person)) taken.add(key(person.ch.tileCol, person.ch.tileRow));
+      }
     }
     for (const [id, route] of this.routes) {
       if (id !== except) taken.add(key(route.target.col, route.target.row));
@@ -792,7 +794,7 @@ export class AeroOffice {
     this.floorSeen = id;
     if (was === undefined || was === id) return;
     for (const person of this.people) {
-      if (!person.returning) continue;
+      if (!person.returning || person.ch.matrixEffect === 'despawn') continue;
       const ch = person.ch;
       const spot = this.freeLoungeTile(person, person);
       if (spot) {
@@ -893,7 +895,7 @@ export class AeroOffice {
       ? { tileCol: seat.seatCol, tileRow: seat.seatRow }
       : { tileCol: lead.tileCol, tileRow: lead.tileRow };
     this.dropRoute(ch.id);
-    const spot = this.nearestFreeTile(anchor) ?? { col: anchor.tileCol, row: anchor.tileRow };
+    const spot = this.nearestFreeTile(anchor, ch.id) ?? { col: anchor.tileCol, row: anchor.tileRow };
     ch.tileCol = spot.col;
     ch.tileRow = spot.row;
     this.stand(ch);
@@ -1091,11 +1093,14 @@ export class AeroOffice {
   /**
    * A free Lounge tile for a person of `home`'s floor or room. Everyone at home that can be shown with it holds its tile, seen or
    * not (its own floor's or room's people, and the owner's, which are on every floor; with no floor on show, all of them), so
-   * people do not stack when their floor comes round. When that leaves no tile, the tiles of the people shown now are all it counts.
+   * people do not stack when their floor comes round; the shown people of another floor do not count. When that leaves no tile, the
+   * tiles of the people shown now are all it counts.
    */
   private freeLoungeTile(home?: { floor: string | null; room: string | null }, self?: Person): Tile | null {
     const taken = this.occupied(Number.NaN);
-    const strict = new Set(taken);
+    // The tiles the characters hold, and, of the people, only those that can be shown with this one (not the shown people of
+    // another floor, whom this one is never seen beside).
+    const strict = home ? this.occupied(Number.NaN, false) : new Set(taken);
     if (home) {
       const sharedWith = (other: Person): boolean => {
         if (!getAeroUpdate()?.floor) return true;
@@ -1423,8 +1428,8 @@ export class AeroOffice {
     return false;
   }
 
-  private nearestFreeTile(from: { tileCol: number; tileRow: number }): Tile | null {
-    const taken = this.occupied(Number.NaN);
+  private nearestFreeTile(from: { tileCol: number; tileRow: number }, except = Number.NaN): Tile | null {
+    const taken = this.occupied(except);
     let best: Tile | null = null;
     let bestD = Infinity;
     for (const t of this.os.walkableTiles) {

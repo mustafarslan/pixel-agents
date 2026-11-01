@@ -21,6 +21,7 @@ import {
   parseAeroUpdate,
 } from '../src/aero/update.js';
 import { AREA_LABEL_FALLBACK_COLOR } from '../src/constants.js';
+import { startMatrixEffect } from '../src/office/engine/matrixEffectState.js';
 import { OfficeState } from '../src/office/engine/officeState.js';
 import { buildDynamicCatalog } from '../src/office/layout/furnitureCatalog.js';
 import type { OfficeLayout, PlacedFurniture, Seat } from '../src/office/types.js';
@@ -818,7 +819,7 @@ test('a hidden person of another floor does not take a tile from this floor’s 
 test('the owner’s people count with everyone: a floor’s person keeps off their tile', () => {
   const os = build();
   os.aero.rng = () => 0;
-  // The owner's reviewer is hidden on floor A (which has its own); it stands on the first tile.
+  // The owner's reviewer is hidden on floor A (which has its own); it stands on the second tile (floor A's own reviewer took the first).
   assert.ok(setAeroUpdate(upd(FA, [...staff(FA, 'reviewer'), ...shared('reviewer')])));
   spawned(os);
   const owner = person(os, 'reviewer', null);
@@ -854,7 +855,10 @@ test('an owner person walking home when the floor id changes is home at once, st
   lead(os, 1, FA);
   const agents = shared('reviewer');
   assert.ok(setAeroUpdate(upd(FA, agents)));
+  // The way home ends on a tile chosen at random: the person is made on the first and sent to the last, so it is always a walk.
+  os.aero.rng = () => 0;
   spawned(os);
+  os.aero.rng = () => 0.99;
   startReviewer(os);
   const p = person(os, 'reviewer', null);
   run(os, 0.3);
@@ -880,7 +884,10 @@ test('a person walking home is left walking when the floor id does not change', 
   lead(os, 1, FA);
   const agents = shared('reviewer');
   assert.ok(setAeroUpdate(upd(FA, agents)));
+  // The way home ends on a tile chosen at random: the person is made on the first and sent to the last, so it is always a walk.
+  os.aero.rng = () => 0;
   spawned(os);
+  os.aero.rng = () => 0.99;
   startReviewer(os);
   const p = person(os, 'reviewer', null);
   run(os, 0.3);
@@ -891,4 +898,89 @@ test('a person walking home is left walking when the floor id does not change', 
   os.update(0.1);
   assert.equal(p.returning, true);
   assert.equal(p.ch.state, CharacterState.WALK);
+});
+
+// ── Loose ends, fix round ──────────────────────────────────────────
+
+const putAt = (p: { ch: { tileCol: number; tileRow: number; x: number; y: number } }, t: { col: number; row: number }) => {
+  p.ch.tileCol = t.col;
+  p.ch.tileRow = t.row;
+  p.ch.x = t.col * 16 + 8;
+  p.ch.y = t.row * 16 + 8;
+};
+
+test('a new person of floor B keeps off its hidden floor mate even when floor A’s shown people fill the other tiles', () => {
+  const os = build();
+  os.aero.rng = () => 0;
+  os.update(0.1);
+  os.aero.loungeWalkable = os.aero.loungeWalkable.slice(0, 3);
+  const [t0, t1, t2] = os.aero.loungeWalkable;
+  assert.ok(setAeroUpdate(upd(FA, [...staff(FA, 'a1', 'a2'), ...staff(FB, 'b1')])));
+  spawned(os);
+  putAt(person(os, 'a1', FA), t0);
+  putAt(person(os, 'a2', FA), t1);
+  const b1 = person(os, 'b1', FB);
+  putAt(b1, t2);
+  assert.ok(setAeroUpdate(upd(FA, [...staff(FA, 'a1', 'a2'), ...staff(FB, 'b1', 'b2')])));
+  spawned(os);
+  const b2 = person(os, 'b2', FB);
+  assert.notDeepEqual([b2.ch.tileCol, b2.ch.tileRow], [b1.ch.tileCol, b1.ch.tileRow], 'not stacked on b1');
+});
+
+test('the snap off the floor (a stand-in ending unseen) keeps off a hidden person of its floor', () => {
+  const os = build();
+  lead(os, 1, FB);
+  const agents = staff(FB, 'reviewer', 'x');
+  assert.ok(setAeroUpdate(upd(FB, agents)));
+  spawned(os);
+  startReviewer(os);
+  const p = person(os, 'reviewer', FB);
+  const x = person(os, 'x', FB);
+  assert.ok(setAeroUpdate(upd(FA, agents)));
+  run(os, 0.2);
+  os.aero.rng = () => 0;
+  putAt(x, os.aero.loungeWalkable[0]);
+  os.removeSubagent(1, 't1');
+  run(os, 0.2);
+  assert.equal(p.subId, null);
+  assert.ok(loungeKeys(os).has(`${p.ch.tileCol},${p.ch.tileRow}`), 'in the Lounge');
+  assert.notDeepEqual([p.ch.tileCol, p.ch.tileRow], [x.ch.tileCol, x.ch.tileRow], 'not on x');
+});
+
+test('a layout rebuild puts a person off the Lounge floor on a tile no hidden person of its floor holds', () => {
+  const os = build();
+  assert.ok(setAeroUpdate(upd(FA, staff(FB, 'p', 'x'))));
+  spawned(os);
+  const p = person(os, 'p', FB);
+  const x = person(os, 'x', FB);
+  os.aero.rng = () => 0;
+  putAt(x, os.aero.loungeWalkable[0]);
+  putAt(p, { col: 0, row: 0 });
+  os.rebuildFromLayout(os.layout);
+  os.update(0.1);
+  assert.ok(loungeKeys(os).has(`${p.ch.tileCol},${p.ch.tileRow}`), 'on the Lounge floor');
+  assert.notDeepEqual([p.ch.tileCol, p.ch.tileRow], [x.ch.tileCol, x.ch.tileRow], 'not on x');
+});
+
+test('a person despawning is not snapped when the floor id changes', () => {
+  const os = build();
+  lead(os, 1, FA);
+  const agents = shared('reviewer');
+  assert.ok(setAeroUpdate(upd(FA, agents)));
+  // The way home ends on a tile chosen at random: the person is made on the first and sent to the last, so it is always a walk.
+  os.aero.rng = () => 0;
+  spawned(os);
+  os.aero.rng = () => 0.99;
+  startReviewer(os);
+  const p = person(os, 'reviewer', null);
+  run(os, 0.3);
+  os.removeSubagent(1, 't1');
+  run(os, 0.2);
+  assert.equal(p.returning, true);
+  const where = [p.ch.tileCol, p.ch.tileRow];
+  startMatrixEffect(p.ch, 'despawn');
+  assert.ok(setAeroUpdate(upd(FB, agents)));
+  os.update(0.1);
+  assert.equal(p.returning, true, 'left alone');
+  assert.deepEqual([p.ch.tileCol, p.ch.tileRow], where);
 });

@@ -608,3 +608,22 @@ test('a hidden stock subagent (a person stands in for it) is not moved when its 
   os.update(0.1);
   assert.deepEqual([s.tileCol, s.tileRow], [17, 6]);
 });
+
+test('a subagent that stands by its lead’s seat keeps its tile through another switch away and back', () => {
+  const os = build();
+  os.addAgent(1, 0, 0, undefined, true, A);
+  const sub = os.addSubagent(1, 'tool-1');
+  onFloor('A');
+  os.update(0.1);
+  const s = ch(os, sub);
+  const swing = () => {
+    onFloor('B');
+    os.update(0.1);
+    onFloor('A');
+    os.update(0.1);
+  };
+  swing();
+  const settled = [s.tileCol, s.tileRow];
+  swing();
+  assert.deepEqual([s.tileCol, s.tileRow], settled, 'not evicted by its own tile');
+});
