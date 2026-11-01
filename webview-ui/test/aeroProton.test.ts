@@ -80,6 +80,8 @@ function loadCatalog(): void {
     entry('SOFA_FRONT', 'chairs', 1, 1, { orientation: 'front' }),
     entry('SOFA_SIDE', 'chairs', 1, 1, { orientation: 'side' }),
     entry('SOFA_BACK', 'chairs', 1, 1, { orientation: 'back' }),
+    // Aero writes a mirrored side sofa as `SOFA_SIDE:left`; the page keeps that as its own type.
+    entry('SOFA_SIDE:left', 'chairs', 1, 1, { orientation: 'left' }),
     entry('AERO_ELEVATOR', 'misc', 2, 2, { backgroundTiles: 1 }),
     entry('AERO_TURNSTILE', 'misc', 1, 2, { backgroundTiles: 1 }),
   ];
@@ -94,7 +96,7 @@ const LOUNGE_SEAT_TILES = [
   { col: 36, row: 22 },
 ];
 
-function buildWorld(): OfficeState {
+function buildWorld(pieces: PlacedFurniture[] = []): OfficeState {
   loadCatalog();
   const f = (uid: string, type: string, col: number, row: number): PlacedFurniture => ({
     uid,
@@ -123,6 +125,7 @@ function buildWorld(): OfficeState {
     f('turn-b', 'AERO_TURNSTILE', 28, 32),
     f('lift-0', 'AERO_ELEVATOR', 25, 34),
     f('lift-1', 'AERO_ELEVATOR', 27, 34),
+    ...pieces,
   ];
   const areaTiles: Array<string | null> = new Array(COLS * ROWS).fill(null);
   const zone = (label: string, c0: number, c1: number, r0: number, r1: number) => {
@@ -189,8 +192,12 @@ function seeded(seed: number): () => number {
 }
 
 /** The office with a working lead on Pod 1's bench, the update in force and the cat placed. */
-function office(rng: () => number, extra: Record<string, unknown> = {}): OfficeState {
-  const os = buildWorld();
+function office(
+  rng: () => number,
+  extra: Record<string, unknown> = {},
+  pieces: PlacedFurniture[] = [],
+): OfficeState {
+  const os = buildWorld(pieces);
   os.aero.rng = rng;
   os.addAgent(1, 0, 0, undefined, true, FA);
   os.setAgentActive(1, true);
@@ -277,18 +284,28 @@ test('protonArea keeps only the largest reachable part, drops the toilets, the l
 
 // ── When she shows ─────────────────────────────────────────────────
 
-test('no cat without an update, in the Rooms style (no live pods) or with the Lounge off', () => {
-  const os = buildWorld();
-  os.aero.rng = seeded(2);
-  run(os, 5);
-  assert.equal(cat(os), null, 'off: no update');
+test('no cat without an update, in the Rooms style (no live pods) or with the Lounge off; one made first is not drawn frozen', () => {
+  const off = buildWorld();
+  off.aero.rng = seeded(2);
+  run(off, 5);
+  assert.equal(cat(off), null, 'off: no update');
+  // The cat exists first, then each way of switching her off.
+  const os = office(seeded(2));
+  assert.notEqual(cat(os), null, 'on with pods in force');
+  assert.ok(os.aero.proton, 'the cat is made');
   assert.ok(setAeroUpdate(rooms()));
-  run(os, 5);
+  run(os, 2);
   assert.equal(getAeroUpdate()!.pods, undefined);
   assert.equal(cat(os), null, 'rooms: no pods');
+  assert.equal(os.aero.protonView(), null);
+  assert.ok(setAeroUpdate(upd()));
+  run(os, 2);
+  assert.notEqual(cat(os), null, 'back on');
   assert.ok(setAeroUpdate(upd(FA, { lounge: false })));
-  run(os, 5);
-  assert.equal(cat(os), null, 'lounge off');
+  run(os, 2);
+  assert.equal(cat(os), null, 'lounge off: not in the snapshot');
+  assert.equal(os.aero.protonView(), null, 'lounge off: not drawn');
+  assert.deepEqual(os.aero.protonSprites(), []);
   assert.ok(setAeroUpdate(upd()));
   run(os, 1);
   assert.notEqual(cat(os), null, 'back on with pods in force');
@@ -296,12 +313,43 @@ test('no cat without an update, in the Rooms style (no live pods) or with the Lo
 
 // ── Her first moves ────────────────────────────────────────────────
 
-test('she waits three seconds, then moves; and moves again within thirty seconds', () => {
+test('she waits about three seconds where she is placed, then moves', () => {
+  for (const seed of [3, 4, 5, 6]) {
+    const os = buildWorld();
+    os.aero.rng = seeded(seed);
+    os.addAgent(1, 0, 0, undefined, true, FA);
+    os.setAgentActive(1, true);
+    assert.ok(setAeroUpdate(upd()));
+    let shownAt = -1;
+    let moveAt = -1;
+    let at = { col: -1, row: -1 };
+    for (let t = 0; t < 15; t += 0.1) {
+      os.update(0.1);
+      const c = cat(os);
+      if (c === null) continue;
+      if (shownAt < 0) {
+        shownAt = t;
+        at = { col: c.col, row: c.row };
+      }
+      if (c.mode === 'walk' || c.moves > 0) {
+        moveAt = t;
+        break;
+      }
+      assert.deepEqual({ col: c.col, row: c.row }, at, `seed ${seed}: still at ${t}`);
+    }
+    assert.ok(shownAt >= 0 && moveAt >= 0, `seed ${seed}: shown ${shownAt}, moved ${moveAt}`);
+    const waited = moveAt - shownAt;
+    assert.ok(
+      waited >= PROTON_FIRST_WAIT_SEC - 0.15 && waited <= PROTON_FIRST_WAIT_SEC + 0.35,
+      `seed ${seed}: waited ${waited}`,
+    );
+  }
+});
+
+test('she moves within ten seconds of any moment, and moves again within thirty seconds', () => {
   for (const seed of [3, 4, 5, 6]) {
     const os = office(seeded(seed));
-    const start = cat(os)!;
-    assert.equal(PROTON_FIRST_WAIT_SEC, 3);
-    const baseline = start.moves;
+    const baseline = cat(os)!.moves;
     let firstAt = -1;
     let secondAt = -1;
     for (let t = 0; t < 40; t += 0.1) {
@@ -551,15 +599,79 @@ test('she gets up the tick a seat is gone: assigned, routed to, or a character s
   }
 });
 
-test('a layout rebuild drops her seat and checks her tile again', () => {
+test('a layout rebuild drops her seat and puts her on a walk tile, not on the seat she held', () => {
   const { os, seat } = napping();
-  assert.ok(seat);
+  const seatTiles = new Set([...os.seats.values()].map((x) => key(x.seatCol, x.seatRow)));
+  assert.ok(seatTiles.has(key(os.aero.proton!.col, os.aero.proton!.row)), 'she sleeps on a seat');
   os.rebuildFromLayout(os.getLayout());
-  os.update(0.1);
+  os.aero.snapshot(); // a refresh, without a step
   const p = os.aero.proton!;
   assert.ok(os.aero.protonAllowed().has(key(p.col, p.row)), 'on an allowed tile');
-  // Her tile was a seat she no longer holds, or she walks; either way she holds no seat she must give up.
-  assert.ok(p.seat === null || p.seat !== seat || p.mode === 'walk' || p.mode === 'sleep');
+  assert.ok(!seatTiles.has(key(p.col, p.row)), 'on a walk tile, not a seat');
+  assert.equal(p.seat, null, 'she holds no seat');
+  os.update(0.1);
+  const q = os.aero.proton!;
+  assert.ok(q.seat === null || q.mode === 'walk', `${seat} is not held on: ${q.seat} ${q.mode}`);
+});
+
+test('protonAllowed only reads: it does not refresh her away', () => {
+  const { os, seat } = napping();
+  const before = os.aero.proton!;
+  assert.equal(before.seat, seat);
+  // A rebuilt layout is refreshed by a tick or a snapshot; a read alone must not do it (and so must not reset her).
+  os.rebuildFromLayout(os.getLayout());
+  os.aero.protonAllowed();
+  os.aero.protonAllowed();
+  assert.equal(os.aero.proton!.seat, seat, 'still holds her seat');
+  assert.ok(before.mode === 'sleep' || before.mode === 'knead');
+});
+
+test('pre-empted mid-walk she finishes the step to the next tile and then decides again; she never snaps back or lands on the seat', () => {
+  const os = office(() => 0.4);
+  let seat: string | null = null;
+  for (let t = 0; t < 200 && seat === null; t += 0.1) {
+    os.update(0.1);
+    const p = os.aero.proton!;
+    const mid = (p.x - 8) % 16 !== 0 || (p.y - 8) % 16 !== 0;
+    // Far from the seat (at least three tiles to go) and between two tiles.
+    if (p.mode === 'walk' && p.seat !== null && mid) {
+      const s = os.seats.get(p.seat)!;
+      if (Math.abs(s.seatCol - p.col) + Math.abs(s.seatRow - p.row) >= 3) seat = p.seat;
+    }
+  }
+  assert.ok(seat, 'she walks to a nap seat');
+  const p = os.aero.proton!;
+  const from = { x: p.x, y: p.y, col: p.col, row: p.row, moves: p.moves };
+  os.seats.get(seat!)!.assigned = true;
+  os.update(0.1);
+  const q = os.aero.proton!;
+  assert.notEqual(q.seat, seat, 'she let go of the seat');
+  const aCentre = { x: from.col * 16 + 8, y: from.row * 16 + 8 };
+  assert.ok(q.x !== aCentre.x || q.y !== aCentre.y, 'not snapped back to her last whole tile');
+  assert.ok(
+    Math.hypot(q.x - aCentre.x, q.y - aCentre.y) >=
+      Math.hypot(from.x - aCentre.x, from.y - aCentre.y),
+    'she kept going forward',
+  );
+  const s = os.seats.get(seat!)!;
+  for (let t = 0; t < 4; t += 0.1) {
+    os.update(0.1);
+    const r = os.aero.proton!;
+    assert.ok(!(r.col === s.seatCol && r.row === s.seatRow), 'never on the vacated seat');
+  }
+  assert.ok(os.aero.proton!.moves > from.moves);
+});
+
+test('a side sofa Aero writes as SOFA_SIDE:left is a nap seat too', () => {
+  const left = { uid: 'rec-left', type: 'SOFA_SIDE:left', col: 31, row: 29 };
+  const os = office(seeded(45), {}, [left]);
+  for (const s of NAP_SEATS) os.seats.get(s)!.assigned = true;
+  assert.ok(os.seats.has('rec-left'), 'the piece is a seat');
+  assert.ok(os.aero.protonAllowed().has(key(31, 29)), 'and an allowed tile');
+  const w = watch(os, 600);
+  assert.deepEqual(w.bad, []);
+  assert.ok(w.seats.has('rec-left'), `seats: ${[...w.seats].join()}`);
+  assert.ok([...w.seats].every((x) => x === 'rec-left'));
 });
 
 // ── One cat across floors ──────────────────────────────────────────

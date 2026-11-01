@@ -502,7 +502,9 @@ export class AeroOffice {
     const sofas: Array<Tile & { seat: string }> = [];
     for (const seat of os.seats.values()) {
       const type = baseType(seat.uid);
-      if (type === 'SOFA_FRONT' || type === 'SOFA_SIDE') {
+      // A mirrored side sofa is written `SOFA_SIDE:left` (or `:right`): the same sofa.
+      const sofa = type?.replace(/:(left|right)$/, '');
+      if (sofa === 'SOFA_FRONT' || sofa === 'SOFA_SIDE') {
         sofas.push({ col: seat.seatCol, row: seat.seatRow, seat: seat.uid });
       }
     }
@@ -550,38 +552,62 @@ export class AeroOffice {
     };
     const cat = this.proton;
     if (cat) {
-      cat.giveUp();
-      if (!this.protonTileAllowed(cat.col, cat.row)) this.placeProton(cat);
+      cat.giveUp(false);
+      // She stands on a walk tile, not on a seat she no longer holds (nor off her area): the nearest one.
+      if (!area.walk.has(key(cat.col, cat.row)))
+        this.placeProton(cat, this.nearestWalk(cat.col, cat.row));
     }
   }
 
-  private protonTileAllowed(col: number, row: number): boolean {
-    const k = key(col, row);
-    return !!this.area && (this.area.walk.has(k) || this.area.seats.has(k));
+  /** The walk tile nearest (col, row) by Manhattan distance, the first in row order on a tie; null when she has no area. */
+  private nearestWalk(col: number, row: number): Tile | null {
+    let best: Tile | null = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (const k of this.area?.walk ?? []) {
+      const [c, r] = k.split(',').map(Number);
+      const d = Math.abs(c - col) + Math.abs(r - row);
+      if (d < bestDistance) {
+        bestDistance = d;
+        best = { col: c, row: r };
+      }
+    }
+    return best;
   }
 
   /** Every tile Proton may be on: the walkable ones and the sofa and Lounge seats beside them. */
   protonAllowed(): ReadonlySet<string> {
-    this.refresh();
+    // Reading never refreshes her away: only when there is no area yet.
+    if (!this.area) this.refresh();
     const out = new Set<string>();
     for (const k of this.area?.walk ?? []) out.add(k);
     for (const k of this.area?.seats ?? []) out.add(k);
     return out;
   }
 
-  /** Puts the cat on a random tile of her area (the injected rng). */
-  private placeProton(cat: Proton): void {
+  /** A random tile of her area (the injected rng), or null when she has none. */
+  private randomWalkTile(): Tile | null {
     const tiles = [...(this.area?.walk ?? [])];
-    if (tiles.length === 0) return;
+    if (tiles.length === 0) return null;
     const [col, row] = tiles[Math.floor(this.rng() * tiles.length) % tiles.length]
       .split(',')
       .map(Number);
-    cat.place({ col, row });
+    return { col, row };
+  }
+
+  /** Puts the cat on `tile`, or on a random tile of her area. */
+  private placeProton(cat: Proton, tile: Tile | null = this.randomWalkTile()): void {
+    if (tile) cat.place(tile);
   }
 
   /** She shows only with live pods and the Lounge on, so the Rooms style and an Aero that is off have no cat. */
   private protonOn(update: AeroUpdate | null): boolean {
-    return update !== null && this.podsInForce() && !!this.area && this.area.walk.size > 0;
+    return (
+      update !== null &&
+      this.enabled() !== null &&
+      this.podsInForce() &&
+      !!this.area &&
+      this.area.walk.size > 0
+    );
   }
 
   /** Whether a nap seat is still hers to take: it exists, nobody holds it, no route or station targets it, nobody stands on it. */
@@ -655,9 +681,11 @@ export class AeroOffice {
     if (update === null || !this.protonOn(update)) return;
     let cat = this.proton;
     if (!cat) {
-      cat = new Proton({ col: 0, row: 0 });
+      const tile = this.randomWalkTile();
+      if (!tile) return;
+      // Made standing: she waits her first three seconds where she is placed.
+      cat = new Proton(tile);
       this.proton = cat;
-      this.placeProton(cat);
     }
     if (cat.seat !== null && !this.napFree(cat.seat)) cat.giveUp();
     cat.update(dt, this.protonWorld(update));

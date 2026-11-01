@@ -776,6 +776,8 @@ export class Proton {
   private progress = 0;
   private timer = PROTON_FIRST_WAIT_SEC;
   private phases: Phase[] = [];
+  /** Pre-empted on the way: decide again on arriving at the tile she was stepping to. */
+  private rushed = false;
 
   constructor(tile: Tile) {
     this.col = tile.col;
@@ -788,17 +790,26 @@ export class Proton {
   place(tile: Tile): void {
     this.col = tile.col;
     this.row = tile.row;
-    this.giveUp();
+    this.giveUp(false);
   }
 
-  /** Stops where she is (her last whole tile) and decides again on the next step; she holds no seat. */
-  giveUp(): void {
+  /**
+   * Lets go of whatever she was doing and decides again. Pre-empted between two tiles she finishes that one step first (`settle`,
+   * the default) and decides on arrival; otherwise (a new layout) she stands on her last whole tile at once.
+   */
+  giveUp(settle = true): void {
     this.seat = null;
     this.spot = null;
-    this.path = [];
-    this.progress = 0;
     this.phases = [];
     this.timer = 0;
+    if (settle && this.path.length > 0 && this.progress > 0) {
+      this.path = [this.path[0]];
+      this.rushed = true;
+      return;
+    }
+    this.path = [];
+    this.progress = 0;
+    this.rushed = false;
     this.x = this.col * TILE_SIZE + TILE_SIZE / 2;
     this.y = this.row * TILE_SIZE + TILE_SIZE / 2;
     this.setMode('sit');
@@ -857,6 +868,13 @@ export class Proton {
 
   /** At the spot: starts the stay (a nap from the front, the café facing up). */
   private arrive(w: ProtonWorld): void {
+    if (this.rushed) {
+      this.rushed = false;
+      this.phases = [];
+      this.timer = 0;
+      this.setMode('sit');
+      return;
+    }
     const kind = this.spot;
     this.dir = kind === 'cafe' ? Direction.UP : Direction.DOWN;
     if (kind === null) {
