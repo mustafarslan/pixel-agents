@@ -1285,10 +1285,17 @@ export class OfficeState {
     this.furniture = layoutToFurnitureInstances(modifiedFurniture);
   }
 
+  /**
+   * Aero: how many tools each agent has started (a `setAgentTool` with a tool, not the clearing one). `currentTool` is cleared only at
+   * the end of a turn, so two questions in a row are told apart by this count. Pruned by `AeroOffice.afterTick` for gone agents.
+   */
+  readonly toolStarts = new Map<number, number>();
+
   setAgentTool(id: number, tool: string | null): void {
     const ch = this.characters.get(id);
     if (ch) {
       ch.currentTool = tool;
+      if (tool !== null) this.toolStarts.set(id, (this.toolStarts.get(id) ?? 0) + 1);
     }
   }
 

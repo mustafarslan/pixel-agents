@@ -9,6 +9,7 @@
  * Characters here never touch `seat.assigned`: a rest seat is tracked in `routes`, so a layout rebuild or the stock
  * seat logic never has to know about it.
  */
+import { playTubeSound } from '../notificationSound.js';
 import { createCharacter, updateCharacter } from '../office/engine/characters.js';
 import { advanceMatrixEffect, startMatrixEffect } from '../office/engine/matrixEffectState.js';
 import type { OfficeState } from '../office/engine/officeState.js';
@@ -77,6 +78,7 @@ import {
   type RoutePhase,
   smokeAllowed,
   smokeSeconds,
+  TUBE_SEC,
   VENDING_SEC,
 } from './routines.js';
 import {
@@ -211,6 +213,12 @@ const BUBBLE_VENDING = '\u{1F964}';
 const BUBBLE_VENDING_FUN = '\u{1F36B}';
 const BUBBLE_SMOKE = '\u{1F6AC}';
 const FUN_ZONE = 'Fun';
+/** The tool that asks the owner a question: the lead is active while it waits, so the tool itself is the signal. */
+const QUESTION_TOOL = 'AskUserQuestion';
+/** The tube's capsule effect plays this far above the front tile's centre, at the receiver's breech. */
+const FX_TUBE_RISE = 14;
+/** The posts kept for the snapshot (the self-test reads them: a one-second stand can fall between two polls). */
+const MAX_TUBE_POSTS = 32;
 
 /** The front desk's chairs and people: one chair type, told apart by the layout's uids (an index suffix breaks on a reorder). */
 const DESK_CHAIR_TYPE = 'CUSHIONED_CHAIR_FRONT';
@@ -297,6 +305,10 @@ export interface Route {
   second?: boolean;
   fx?: StageFx | null;
   bubble?: string | null;
+  /** A tube route: the need it answers (its kind and the lead's tool count), which place of the queue it holds, and whether it posted. */
+  need?: string;
+  slot?: number;
+  posted?: boolean;
 }
 
 const kindOf = (route: Route): RouteKind => route.kind ?? 'lounge';
@@ -467,6 +479,15 @@ export class AeroOffice {
   private smoked = new Map<number, number>();
   private pickAt = new Map<number, number>();
   private lunchWas = false;
+  /** The need (see `needOf`) each lead has been sent to the tube for, until that need ends. */
+  private tubeLatch = new Map<number, string>();
+  /** Plays the whoosh when a capsule is posted: the page's sound, or what a test puts here. */
+  tubeSound: () => void = () => {
+    void playTubeSound();
+  };
+  /** How many capsules have been posted, and the last ones (who, and the tile they stood on). */
+  private tubesPosted = 0;
+  private tubePosts: Array<{ id: number; col: number; row: number }> = [];
   people: Person[] = [];
   chats = new Map<number, Chat>();
   /** The effects (pixelfx) Aero starts: a burst on the whiteboard, a countdown on the clock, a poof at a person. */
@@ -940,15 +961,18 @@ export class AeroOffice {
       return;
     }
 
+    // A lead the owner is needed by walks to the tube station first; a question leaves the lead active, so this is before that branch.
+    if (this.tubeStep(ch, dt, step)) return;
+
     if (ch.isActive) {
       this.leave(ch);
       step();
       return;
     }
-    // Only a permission bubble holds an idle lead at its desk. A question (AskUserQuestion) is an active tool, so the lead is
-    // active and stays anyway; and `idle_prompt` reaches the page as a finished turn with `awaitingInput` for every idle
-    // session, so that flag says nothing about the owner being needed.
-    if (ch.bubbleType === 'permission') {
+    // Only a permission bubble holds an idle lead at its desk (and one that has been to the tube for its need). A question
+    // (AskUserQuestion) is an active tool, so the lead is active and stays anyway; and `idle_prompt` reaches the page as a
+    // finished turn with `awaitingInput` for every idle session, so that flag says nothing about the owner being needed.
+    if (ch.bubbleType === 'permission' || this.tubeHeld(ch)) {
       this.leave(ch);
       if (ch.state === CharacterState.TYPE) {
         // At its desk, waiting: sit still.
@@ -1023,6 +1047,9 @@ export class AeroOffice {
   }
 
   private dropRoute(id: number): void {
+    const route = this.routes.get(id);
+    // A trip that never posted is not a trip the need was answered by: the lead may be sent again.
+    if (route && kindOf(route) === 'tube' && route.posted !== true) this.tubeLatch.delete(id);
     if (this.routes.delete(id)) this.occupancy++;
     this.chats.delete(id);
   }
@@ -1046,7 +1073,7 @@ export class AeroOffice {
     this.stand(ch);
   }
 
-  private occupied(except: number, withPeople = true): Set<string> {
+  private occupied(except: number, withPeople = true, withTubeQueue = true): Set<string> {
     const taken = new Set<string>();
     for (const other of this.os.characters.values()) {
       if (other.id !== except && !this.offFloor.has(other.id)) {
@@ -1064,6 +1091,14 @@ export class AeroOffice {
       if (route.next) taken.add(key(route.next.target.col, route.next.target.row));
     };
     for (const [id, route] of this.routes) if (id !== except) reserve(route);
+    // While anybody is on the way to the tube, all of its queue is spoken for: a break or the cat takes none of it.
+    if (withTubeQueue && this.book?.tube) {
+      for (const route of this.routes.values()) {
+        if (kindOf(route) !== 'tube') continue;
+        for (const t of this.book.tube.queue) taken.add(key(t.col, t.row));
+        break;
+      }
+    }
     // The idle staff's breaks: a person on another floor holds no tile (its route is dropped when it is next looked at).
     for (const person of this.people) {
       const route = this.staffRoutes.get(person.ch.id);
@@ -1231,6 +1266,159 @@ export class AeroOffice {
       this.startFx(route.fx.kind, route.fx.x, route.fx.y);
       route.fx = null;
     }
+    if (kindOf(route) === 'tube' && route.slot === 0) this.post(ch, route);
+  }
+
+  // ── The tube station ─────────────────────────────────────────────
+
+  /**
+   * What the owner is needed for, or null: a question (the `AskUserQuestion` tool, which also covers a permission bubble the same
+   * tool brings) or a permission request. The tool count tells two needs of one kind apart: `currentTool` and the bubble stay until
+   * the next tool or the end of the turn, so the count is what changes when the lead asks again.
+   */
+  private needOf(ch: Character): string | null {
+    const kind =
+      ch.currentTool === QUESTION_TOOL
+        ? 'question'
+        : ch.bubbleType === 'permission'
+          ? 'permission'
+          : null;
+    return kind === null ? null : `${kind}:${this.os.toolStarts.get(ch.id) ?? 0}`;
+  }
+
+  /** Whether `ch` has been to the tube for the need it has now (so it waits at its desk). */
+  private tubeHeld(ch: Character): boolean {
+    const need = this.needOf(ch);
+    return need !== null && this.tubeLatch.get(ch.id) === need;
+  }
+
+  /**
+   * A lead's step while the owner is needed. True when it handled the tick (it is on its way to, in the queue of, or at the tube);
+   * false leaves the lead to the usual rules (no tube, no new need, the queue full, or a lead that is a teammate).
+   */
+  private tubeStep(ch: Character, dt: number, step: () => void): boolean {
+    const tube = this.book?.tube;
+    if (!tube || ch.leadAgentId !== undefined) return false;
+    const need = this.needOf(ch);
+    let route: Route | null = this.routes.get(ch.id) ?? null;
+    if (route && kindOf(route) === 'tube') {
+      // The need ended (a new tool, the end of the turn) or changed: back to the usual rules, or the new need's own trip.
+      if (route.need !== need) {
+        this.leave(ch);
+        route = null;
+      }
+    } else {
+      route = null;
+    }
+    if (!route) {
+      if (need === null || this.tubeLatch.get(ch.id) === need || this.backedOff(ch.id))
+        return false;
+      route = this.startTube(ch, need, tube.queue);
+      if (!route) {
+        this.failed.set(ch.id, { at: this.clock, occupancy: this.occupancy });
+        return false;
+      }
+      this.failed.delete(ch.id);
+    }
+    // The stock step would turn an active walker back to its seat at every tile.
+    const was = ch.isActive;
+    ch.isActive = false;
+    if (route.arrived) {
+      this.settleTube(ch, route);
+      this.advanceTube(ch, route, dt, tube.queue);
+    } else {
+      step();
+      this.watchWalk(ch, route, () => {
+        this.dropRoute(ch.id);
+        this.failed.set(ch.id, { at: this.clock, occupancy: this.occupancy });
+      });
+    }
+    ch.isActive = was;
+    return true;
+  }
+
+  /** Starts the walk to the front-most free place of the queue; null when all are taken or none can be reached. */
+  private startTube(ch: Character, need: string, queue: Tile[]): Route | null {
+    const taken = this.occupied(ch.id, true, false);
+    for (const [slot, tile] of queue.entries()) {
+      if (taken.has(key(tile.col, tile.row))) continue;
+      const here = ch.tileCol === tile.col && ch.tileRow === tile.row;
+      const walkable = here || this.pathTo(ch, tile).length > 0;
+      if (!walkable) continue;
+      this.leave(ch);
+      const route: Route = {
+        mode: 'rest',
+        kind: 'tube',
+        target: { col: tile.col, row: tile.row },
+        seatUid: null,
+        dir: Direction.UP,
+        timer: TUBE_SEC,
+        bubble: null,
+        arrived: false,
+        tries: 0,
+        need,
+        slot,
+        posted: false,
+      };
+      this.putRoute(ch.id, route);
+      this.tubeLatch.set(ch.id, need);
+      if (here) this.arrive(ch, route);
+      else this.walkTo(ch, tile);
+      return route;
+    }
+    return null;
+  }
+
+  /** Keeps a lead in the queue standing, facing the tube. */
+  private settleTube(ch: Character, route: Route): void {
+    ch.frame = 0;
+    ch.path = [];
+    ch.state = CharacterState.IDLE;
+    ch.dir = route.dir ?? Direction.UP;
+  }
+
+  /** At the back of the queue the lead steps up to a free place in front of it; at the front it stands its second and leaves. */
+  private advanceTube(ch: Character, route: Route, dt: number, queue: Tile[]): void {
+    const slot = route.slot ?? 0;
+    if (slot > 0) {
+      const ahead = queue[slot - 1];
+      if (this.occupied(ch.id, true, false).has(key(ahead.col, ahead.row))) return;
+      route.slot = slot - 1;
+      route.target = { col: ahead.col, row: ahead.row };
+      route.arrived = false;
+      route.tries = 0;
+      this.occupancy++;
+      if (!this.walkTo(ch, ahead)) {
+        // Cannot get there: back to its place.
+        const back = queue[slot];
+        route.slot = slot;
+        route.target = { col: back.col, row: back.row };
+        route.arrived = true;
+        return;
+      }
+      // One tile at most: it stands at once when the place is the tile it is on.
+      if (ch.tileCol === ahead.col && ch.tileRow === ahead.row) this.arrive(ch, route);
+      return;
+    }
+    route.timer = (route.timer ?? TUBE_SEC) - dt;
+    if (route.timer <= 0) this.leave(ch);
+  }
+
+  /** The lead is at the front: the capsule goes up (the effect and the whoosh, once), and the post is counted. */
+  private post(ch: Character, route: Route): void {
+    if (route.posted === true) return;
+    route.posted = true;
+    route.timer = TUBE_SEC;
+    this.tubesPosted++;
+    this.tubePosts.push({ id: ch.id, col: route.target.col, row: route.target.row });
+    if (this.tubePosts.length > MAX_TUBE_POSTS) this.tubePosts.shift();
+    // The whoosh plays even when the effect is refused (Reduced Motion, four already running).
+    this.startFx(
+      'capsule',
+      route.target.col * TILE_SIZE + TILE_SIZE / 2,
+      route.target.row * TILE_SIZE + TILE_SIZE / 2 - FX_TUBE_RISE,
+    );
+    this.tubeSound();
   }
 
   /** Keeps an arrived lead sitting or standing, whatever the stock step would do. */
@@ -1767,7 +1955,8 @@ export class AeroOffice {
    */
   private settleArrival(ch: Character): void {
     if (ch.isSubagent || ch.leadAgentId !== undefined || !ch.seatId || ch.isActive) return;
-    if (ch.bubbleType === 'permission' || ch.matrixEffect === 'despawn') return;
+    if (ch.bubbleType === 'permission' || this.tubeHeld(ch) || ch.matrixEffect === 'despawn')
+      return;
     this.refresh();
     const update = this.enabled();
     if (!update || !this.lounge) return;
@@ -1884,6 +2073,15 @@ export class AeroOffice {
     }
     for (const id of [...this.failed.keys()]) {
       if (!this.os.characters.has(id)) this.failed.delete(id);
+    }
+    // A lead whose need ended may be sent again by the next one; gone leads are forgotten (not in `drive`, which returns early for a
+    // lead off the floor).
+    for (const id of [...this.tubeLatch.keys()]) {
+      const lead = this.os.characters.get(id);
+      if (!lead || this.needOf(lead) === null) this.tubeLatch.delete(id);
+    }
+    for (const id of [...this.os.toolStarts.keys()]) {
+      if (!this.os.characters.has(id)) this.os.toolStarts.delete(id);
     }
     // Staff routes, picks and smoke cooldowns of people who are gone are forgotten; lunch starting or ending sends everybody to look again.
     const here = new Set(this.people.map((p) => p.ch.id));
@@ -3413,6 +3611,15 @@ export class AeroOffice {
         }),
       hidden: [...this.os.characters.values()].filter((c) => c.aeroHidden).map((c) => c.id),
       fxStarted: { ...this.fx.started },
+      tube: this.book?.tube
+        ? {
+            col: this.book.tube.col,
+            row: this.book.tube.row,
+            queue: this.book.tube.queue.map((t) => ({ ...t })),
+          }
+        : null,
+      tubeSent: this.tubesPosted,
+      tubePosts: this.tubePosts.map((p) => ({ ...p })),
       meetingsOn: this.meetings,
       huddle: this.huddle
         ? {
@@ -3558,6 +3765,12 @@ export interface AeroSnapshot {
   huddlesHeld: number;
   /** How many effects of each kind have started (counted, so a short one isn't missed by a poll). */
   fxStarted: Record<string, number>;
+  /** The tube station and its queue (the front tile first), or null when the layout has none. */
+  tube: { col: number; row: number; queue: Tile[] } | null;
+  /** How many capsules have been posted. */
+  tubeSent: number;
+  /** The last posts: the lead and the tile it stood on (the front tile). */
+  tubePosts: Array<{ id: number; col: number; row: number }>;
   badges: Record<string, number>;
   /** The front desk's people: where they sit and the bubble they show. */
   npcs: Array<{

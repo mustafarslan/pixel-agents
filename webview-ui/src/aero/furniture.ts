@@ -1,7 +1,7 @@
 /**
- * Aero's twenty-two extra pieces for the big office: a toilet, a sink with a mirror, a fridge, a ping-pong table, a TV with
+ * Aero's twenty-three extra pieces for the big office: a toilet, a sink with a mirror, a fridge, a ping-pong table, a TV with
  * a games console, an arcade cabinet, a water cooler, a pod whiteboard, a flower pot (placeable on desks), a coffee
- * machine, a buffet counter, a vending machine, a security desk, a turnstile, two railing sections, an ashtray stand, a lift (two doors with a floor indicator), and the separators: a frosted glass partition and a planter divider, each with a side view. The stock server (1.5.0) sends its own furniture and knows none of them, so
+ * machine, a buffet counter, a vending machine, a security desk, a turnstile, two railing sections, an ashtray stand, a lift (two doors with a floor indicator), a tube station (a pneumatic post on a wall), and the separators: a frosted glass partition and a planter divider, each with a side view. The stock server (1.5.0) sends its own furniture and knows none of them, so
  * they live in the page and are merged into the catalog at the one place the page receives it (`furnitureAssetsLoaded`).
  *
  * None is `electronics`: the stock seat picker treats that category as a PC and prefers a seat facing one, so agents would
@@ -66,7 +66,7 @@ function piece(
   };
 }
 
-/** The twenty-two entries. Fresh objects each call, so a caller can't change the next one's. */
+/** The twenty-three entries. Fresh objects each call, so a caller can't change the next one's. */
 export function aeroFurnitureCatalog(): AeroCatalogAsset[] {
   return [
     piece('AERO_TOILET', 'Toilet', 'misc', 16, 32, 1, 2, 1),
@@ -114,11 +114,16 @@ export function aeroFurnitureCatalog(): AeroCatalogAsset[] {
       groupId: 'AERO_PLANTER_DIVIDER',
       orientation: 'side',
     }),
+    // The only piece that hangs on a wall (the meeting room's): its two tiles are wall, and its front tile is where a lead posts.
+    {
+      ...piece('AERO_TUBE_STATION', 'Tube station', 'decor', 16, 32, 1, 2, 0),
+      canPlaceOnWalls: true,
+    },
   ];
 }
 
 /**
- * The server's catalog and sprites with Aero's twenty-two added. Never mutates its inputs, never throws on bad ones (a
+ * The server's catalog and sprites with Aero's twenty-three added. Never mutates its inputs, never throws on bad ones (a
  * missing or malformed catalog or sprite map counts as empty, and a malformed entry is dropped), and an id the server already sent is left as it is.
  */
 export function withAeroFurniture<C extends { id: string }>(

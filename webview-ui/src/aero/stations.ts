@@ -10,6 +10,9 @@
 import type { OfficeState } from '../office/engine/officeState.js';
 import { getCatalogEntry } from '../office/layout/furnitureCatalog.js';
 import { Direction } from '../office/types.js';
+import { TUBE_QUEUE } from './routines.js';
+
+type Tile = { col: number; row: number };
 
 export type StationGroup =
   'pc' | 'cooler' | 'whiteboard' | 'focus' | 'hot' | 'library' | 'meeting' | 'shelf';
@@ -48,7 +51,17 @@ export interface BreakBook {
   terrace: BreakSpot[];
 }
 
+/** The tube station: the wall piece's tile, and the tiles a lead stands on to post (the front first, then up to two behind it). */
+export interface TubeSpot {
+  col: number;
+  row: number;
+  /** The queue: `queue[0]` is the front tile (below the piece, facing up), the others are the open tiles behind it. */
+  queue: Tile[];
+}
+
 export interface StationBook {
+  /** The tube station, or null (no piece, or its front tile is not open). */
+  tube: TubeSpot | null;
   /** Focus, hot-desk, library and meeting seats. */
   seats: Station[];
   shelves: Station[];
@@ -72,6 +85,7 @@ const COFFEE_TYPE = 'AERO_COFFEE_MACHINE';
 const VENDING_TYPE = 'AERO_VENDING_MACHINE';
 const ASHTRAY_TYPE = 'AERO_ASHTRAY_STAND';
 const BUFFET_TYPE = 'AERO_BUFFET_COUNTER';
+export const TUBE_TYPE = 'AERO_TUBE_STATION';
 const CAFE_ZONE = 'Café';
 const TERRACE_ZONE = 'Terrace';
 
@@ -91,6 +105,7 @@ export function buildStations(os: OfficeState): StationBook {
   const open = (col: number, row: number): boolean =>
     walkable.has(tileKey(col, row)) && !os.blockedTiles.has(tileKey(col, row));
   const book: StationBook = {
+    tube: null,
     seats: [],
     shelves: [],
     boards: [],
@@ -158,6 +173,10 @@ export function buildStations(os: OfficeState): StationBook {
     else if (f.type === VENDING_TYPE) book.breaks.vending.push(...front());
     else if (f.type === ASHTRAY_TYPE) book.breaks.ashtrays.push(...front());
     else if (f.type === BUFFET_TYPE) book.breaks.buffet.push(...front());
+    // The first tube in the layout is the office's tube; a second is only a picture.
+    if (f.type === TUBE_TYPE && book.tube === null && fronts.length > 0) {
+      book.tube = { col: f.col, row: f.row, queue: tubeQueue(fronts[0], open) };
+    }
     if (SHELF_TYPES.has(f.type) && zone !== null && SHELF_ZONES.has(zone)) {
       for (const t of fronts) book.shelves.push(prop('shelf', t));
     } else if (f.type === BOARD_TYPE && zone !== null && fronts.length > 0) {
@@ -167,4 +186,33 @@ export function buildStations(os: OfficeState): StationBook {
     }
   }
   return book;
+}
+
+/**
+ * The tube's queue: its front tile, then the open tiles straight away from the piece (below the front) while the room lets it, then
+ * the open tiles reachable from the front nearest first (down, left, right, up on a tie).
+ */
+function tubeQueue(front: Tile, open: (col: number, row: number) => boolean): Tile[] {
+  const queue: Tile[] = [{ col: front.col, row: front.row }];
+  const seen = new Set<string>([tileKey(front.col, front.row)]);
+  for (let row = front.row + 1; queue.length < TUBE_QUEUE && open(front.col, row); row++) {
+    queue.push({ col: front.col, row });
+    seen.add(tileKey(front.col, row));
+  }
+  for (let i = 0; i < queue.length && queue.length < TUBE_QUEUE; i++) {
+    for (const [dc, dr] of [
+      [0, 1],
+      [-1, 0],
+      [1, 0],
+      [0, -1],
+    ] as const) {
+      const col = queue[i].col + dc;
+      const row = queue[i].row + dr;
+      const k = tileKey(col, row);
+      if (seen.has(k) || !open(col, row)) continue;
+      seen.add(k);
+      if (queue.length < TUBE_QUEUE) queue.push({ col, row });
+    }
+  }
+  return queue;
 }

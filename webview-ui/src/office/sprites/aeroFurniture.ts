@@ -1029,7 +1029,61 @@ const PLANTER_DIVIDER_SIDE: AeroSpriteGrid = {
   },
 };
 
-/** The twenty-two grids by catalog id. */
+/**
+ * The tube station on a wall (the pneumatic post): a glass tube up into the ceiling between two brass collars, and a brass receiver
+ * box below with a dark breech, a capsule seen in it, a pressure dial and a status lamp. Still: the `capsule` effect is the motion.
+ */
+const TUBE_STATION: AeroSpriteGrid = {
+  map: [
+    '.....oooooo.....',
+    '.....obbbdo.....',
+    '.....odddDo.....',
+    '.....ogwgGo.....',
+    '.....ogwgGo.....',
+    '.....ogwgGo.....',
+    '.....ogwgGo.....',
+    '.....ogwgGo.....',
+    '.....ogwgGo.....',
+    '.....ogwgGo.....',
+    '.....ogwgGo.....',
+    '.....ogwgGo.....',
+    '.....ogwgGo.....',
+    '.....odddDo.....',
+    '.....obbbdo.....',
+    '....oooooooo....',
+    '...oooooooooo...',
+    '...olbbbbbbdo...',
+    '...obbbbbbbdo...',
+    '...oboooooodo...',
+    '...obossssowo...',
+    '...obosccsoGo...',
+    '...obossSsodo...',
+    '...obossssodo...',
+    '...oboooooodo...',
+    '...obbbbbbbdo...',
+    '...odddddddDo...',
+    '...oDDDDDDDDo...',
+    '...oooooooooo...',
+    '..oSSSSSSSSSSo..',
+    '..osssssssssso..',
+    '..oooooooooooo..',
+  ],
+  palette: {
+    o: '#3f3740',
+    s: '#535568',
+    S: '#7a7d94',
+    b: '#cfa86d',
+    d: '#b38857',
+    D: '#885c47',
+    g: '#cfe3ef',
+    G: '#8fb7d4',
+    w: '#ffffff',
+    c: '#e06b50',
+    l: '#58c05f',
+  },
+};
+
+/** The twenty-three grids by catalog id. */
 export const AERO_SPRITE_GRIDS: Readonly<Record<string, AeroSpriteGrid>> = {
   AERO_TOILET: TOILET,
   AERO_SINK: SINK,
@@ -1053,6 +1107,7 @@ export const AERO_SPRITE_GRIDS: Readonly<Record<string, AeroSpriteGrid>> = {
   AERO_GLASS_PARTITION_SIDE: GLASS_PARTITION_SIDE,
   AERO_PLANTER_DIVIDER: PLANTER_DIVIDER,
   AERO_PLANTER_DIVIDER_SIDE: PLANTER_DIVIDER_SIDE,
+  AERO_TUBE_STATION: TUBE_STATION,
 };
 
 /** A grid as the page's `SpriteData`: rows of `#rrggbb`, with `''` for clear. A character outside the palette is clear. */
@@ -1062,7 +1117,7 @@ export function gridToSprite(grid: AeroSpriteGrid): SpriteData {
   );
 }
 
-/** The twenty-two sprites by catalog id. */
+/** The twenty-three sprites by catalog id. */
 export function buildAeroSprites(): Record<string, SpriteData> {
   const out: Record<string, SpriteData> = {};
   for (const [id, grid] of Object.entries(AERO_SPRITE_GRIDS)) out[id] = gridToSprite(grid);

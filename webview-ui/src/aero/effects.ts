@@ -11,8 +11,8 @@ import * as collectBurst from './fx/fx/pickups/collect-burst.js';
 import * as poof from './fx/fx/spawn/poof.js';
 import * as countdown from './fx/fx/ui/countdown.js';
 
-/** `steam` (the coffee machine) and `smoke` (the terrace) are the poof in another palette, so a test tells them from a walking-home poof. */
-export type FxKind = 'burst' | 'countdown' | 'poof' | 'steam' | 'smoke';
+/** `steam` (the coffee machine) and `smoke` (the terrace) are the poof in another palette, so a test tells them from a walking-home poof; `capsule` (the tube station) is the burst in brass and glass colours. */
+export type FxKind = 'burst' | 'countdown' | 'poof' | 'steam' | 'smoke' | 'capsule';
 
 export const MAX_ACTIVE_FX = 4;
 
@@ -52,12 +52,33 @@ function tinted(r: number, g: number, b: number): string[] {
   });
 }
 
+/** The tube's colours as numbers (the lint rule keeps hex literals out of the page): outline, brass from dark to light, capsule red, glass, white. */
+const BRASS_AND_GLASS: ReadonlyArray<readonly [number, number, number]> = [
+  [63, 55, 64],
+  [136, 92, 71],
+  [179, 136, 87],
+  [207, 168, 109],
+  [224, 107, 80],
+  [143, 183, 212],
+  [207, 227, 239],
+  [255, 255, 255],
+];
+
+function rgbHex(r: number, g: number, b: number): string {
+  return `#${[r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+}
+
 export const FX_SPECS: Record<FxKind, FxSpec> = {
   burst: { mod: collectBurst as unknown as FxModule, scale: 0.5, options: {} },
   countdown: { mod: countdown as unknown as FxModule, scale: 0.5, options: {} },
   poof: { mod: poof as unknown as FxModule, scale: 0.5, options: {} },
   steam: { mod: poof as unknown as FxModule, scale: 0.5, options: { palette: tinted(0, 8, 14) } },
   smoke: { mod: poof as unknown as FxModule, scale: 0.5, options: { palette: tinted(0, 0, 0) } },
+  capsule: {
+    mod: collectBurst as unknown as FxModule,
+    scale: 0.5,
+    options: { palette: BRASS_AND_GLASS.map(([r, g, b]) => rgbHex(r, g, b)) },
+  },
 };
 
 export interface ActiveFx {

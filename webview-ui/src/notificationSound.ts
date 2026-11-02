@@ -22,13 +22,17 @@ let audioCtx: AudioContext | null = null;
  *  declared by testHooks.ts). Records BEFORE the soundEnabled gate so tests
  *  verify dispatch independent of user audio prefs. Gated on the e2e harness
  *  flag so this unbounded log never grows in a real session. */
-function recordSoundForTests(kind: 'done' | 'permission'): void {
+function recordSoundForTests(kind: 'done' | 'permission' | 'tube'): void {
   if (!isE2E || typeof window === 'undefined') return;
-  if (!window.__pixelAgentsTestHooks) window.__pixelAgentsTestHooks = {};
-  if (!window.__pixelAgentsTestHooks.playedSounds) {
-    window.__pixelAgentsTestHooks.playedSounds = [];
+  // Typed here, not through testHooks.ts's global: the test projects compile this file (the office plays the tube's sound) without it.
+  const w = window as unknown as {
+    __pixelAgentsTestHooks?: { playedSounds?: Array<{ kind: string; at: number }> };
+  };
+  if (!w.__pixelAgentsTestHooks) w.__pixelAgentsTestHooks = {};
+  if (!w.__pixelAgentsTestHooks.playedSounds) {
+    w.__pixelAgentsTestHooks.playedSounds = [];
   }
-  window.__pixelAgentsTestHooks.playedSounds.push({ kind, at: Date.now() });
+  w.__pixelAgentsTestHooks.playedSounds.push({ kind, at: Date.now() });
 }
 
 export function setSoundEnabled(enabled: boolean): void {
@@ -107,6 +111,32 @@ export async function playPermissionSound(): Promise<void> {
       PERMISSION_NOTE_DURATION_SEC,
       PERMISSION_VOLUME,
     );
+  } catch {
+    // Audio may not be available
+  }
+}
+
+// Aero's tube station: a short two-note whoosh, rising (D5 -> A5), softer than the permission tap.
+const TUBE_NOTE_1_HZ = 587.33;
+const TUBE_NOTE_2_HZ = 880;
+const TUBE_NOTE_1_START_SEC = 0;
+const TUBE_NOTE_2_START_SEC = 0.09;
+const TUBE_NOTE_DURATION_SEC = 0.16;
+const TUBE_VOLUME = 0.1;
+
+/** The whoosh of a capsule posted at the tube station: recorded for the e2e tests like the others, silent with the sound switch off. */
+export async function playTubeSound(): Promise<void> {
+  recordSoundForTests('tube');
+  if (!soundEnabled) return;
+  try {
+    if (!audioCtx) {
+      audioCtx = new AudioContext();
+    }
+    if (audioCtx.state === 'suspended') {
+      await audioCtx.resume();
+    }
+    playNote(audioCtx, TUBE_NOTE_1_HZ, TUBE_NOTE_1_START_SEC, TUBE_NOTE_DURATION_SEC, TUBE_VOLUME);
+    playNote(audioCtx, TUBE_NOTE_2_HZ, TUBE_NOTE_2_START_SEC, TUBE_NOTE_DURATION_SEC, TUBE_VOLUME);
   } catch {
     // Audio may not be available
   }

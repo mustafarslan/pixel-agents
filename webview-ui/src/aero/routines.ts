@@ -9,8 +9,8 @@
 
 export type BreakKind = 'cooler' | 'coffee' | 'vending' | 'smoke';
 
-/** What a route is for: the Lounge, a break, or lunch in the café. */
-export type RouteKind = 'lounge' | BreakKind | 'lunch';
+/** What a route is for: the Lounge, a break, lunch in the café, or posting a capsule at the tube station. */
+export type RouteKind = 'lounge' | BreakKind | 'lunch' | 'tube';
 
 export const BREAK_KINDS: readonly BreakKind[] = ['cooler', 'coffee', 'vending', 'smoke'];
 
@@ -39,6 +39,10 @@ export const COFFEE_SEC = 4;
 export const BAR_SEC = 8;
 export const VENDING_SEC = 4;
 export const BUFFET_SEC = 2.5;
+/** How long a lead stands at the tube's front tile after posting its capsule. */
+export const TUBE_SEC = 1;
+/** How many leads queue for the tube at once: the front tile and two behind it. */
+export const TUBE_QUEUE = 3;
 /** A lead resting at the Lounge table at lunch looks again for a free café seat this often. */
 export const LUNCH_RECHECK_SEC = 3;
 

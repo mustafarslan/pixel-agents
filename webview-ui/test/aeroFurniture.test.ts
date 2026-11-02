@@ -55,6 +55,7 @@ const IDS = [
   'AERO_GLASS_PARTITION_SIDE',
   'AERO_PLANTER_DIVIDER',
   'AERO_PLANTER_DIVIDER_SIDE',
+  'AERO_TUBE_STATION',
 ];
 /** The category of each of the sixteen newer pieces. */
 const CATEGORIES: Record<string, string> = {
@@ -99,6 +100,7 @@ const SIZES: Record<string, number[]> = {
   AERO_GLASS_PARTITION_SIDE: [16, 32, 1, 2, 1],
   AERO_PLANTER_DIVIDER: [16, 32, 1, 2, 1],
   AERO_PLANTER_DIVIDER_SIDE: [16, 32, 1, 2, 1],
+  AERO_TUBE_STATION: [16, 32, 1, 2, 0],
 };
 
 // A stand-in for what the server sends: one flat grey stock piece.
@@ -247,7 +249,8 @@ test('the entries carry the plan sizes, a category that is never chairs, and no 
     );
     assert.notEqual(e.category, 'chairs');
     assert.equal(e.isDesk, false);
-    assert.equal(e.canPlaceOnWalls, false);
+    // The tube station is the one wall piece.
+    assert.equal(e.canPlaceOnWalls, e.id === 'AERO_TUBE_STATION');
     // Only the flower pot goes on a desk.
     assert.equal(e.canPlaceOnSurfaces, e.id === 'AERO_FLOWER_POT', `${e.id} surface flag`);
     assert.equal(e.file, '');
@@ -477,7 +480,7 @@ test('the hook fields the self-test reads: desk and wall flags, uniform rows, pa
     const entry = getCatalogEntry(id);
     assert.ok(entry, id);
     assert.equal(entry.isDesk, false, id);
-    assert.equal(entry.canPlaceOnWalls ?? false, false, id);
+    assert.equal(entry.canPlaceOnWalls ?? false, id === 'AERO_TUBE_STATION', id);
     assert.ok(
       entry.sprite.every((row) => row.length === entry.sprite[0]?.length),
       `${id} uniform rows`,
