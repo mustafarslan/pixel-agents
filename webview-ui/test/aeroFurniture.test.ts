@@ -1,5 +1,5 @@
 /**
- * Aero's twenty-two furniture pieces: each sprite is a whole picture of its size, the merge adds them to the server's catalog
+ * Aero's twenty-three furniture pieces: each sprite is a whole picture of its size, the merge adds them to the server's catalog
  * without touching a stock entry or the message, a bad catalog never throws, and a layout that names them draws them
  * and blocks the right tiles.
  */
@@ -125,7 +125,7 @@ function stockSprites(): Record<string, SpriteData> {
   return { WHITEBOARD: Array.from({ length: 32 }, () => new Array<string>(16).fill(GREY)) };
 }
 
-test('the twenty-two grids are whole: the right size, only palette characters, drawn in every tile', () => {
+test('the twenty-three grids are whole: the right size, only palette characters, drawn in every tile', () => {
   const sprites = buildAeroSprites();
   assert.deepEqual(Object.keys(sprites).sort(), [...IDS].sort());
   for (const id of IDS) {
@@ -258,7 +258,7 @@ test('the entries carry the plan sizes, a category that is never chairs, and no 
   }
 });
 
-test('the merge adds all twenty-two, leaves the stock entry and its sprite alone, and never changes its inputs', () => {
+test('the merge adds all twenty-three, leaves the stock entry and its sprite alone, and never changes its inputs', () => {
   const catalog = stockCatalog();
   const sprites = stockSprites();
   const before = JSON.stringify({ catalog, sprites });
@@ -360,7 +360,7 @@ test('a layout naming the first six draws them and blocks their tiles by footpri
   assert.equal(blocked.size, 4 + 4 + 2);
 });
 
-test('a layout naming all twenty-two blocks exactly the footprint rows below each background row', () => {
+test('a layout naming all twenty-three blocks exactly the footprint rows below each background row', () => {
   const m = withAeroFurniture(stockCatalog(), stockSprites());
   buildDynamicCatalog({ catalog: m.catalog, sprites: m.sprites });
   const furniture: PlacedFurniture[] = IDS.map((type, i) => ({

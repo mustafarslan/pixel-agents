@@ -832,8 +832,8 @@ export class AeroOffice {
       this.proton = cat;
     }
     if (cat.seat !== null && !this.napFree(cat.seat)) cat.giveUp();
-    // A café or sun spot somebody stands on or is walking to (a break) is not hers: she gives up as she does for a seat.
-    else if (cat.spot === 'cafe' || cat.spot === 'sun') {
+    // A spot somebody stands on or is walking to (a break, the tube's queue) is not hers: she gives up as she does for a seat.
+    else if (cat.spot !== null) {
       const at = cat.spotTile();
       if (this.occupied(Number.NaN).has(key(at.col, at.row))) cat.giveUp();
     }
@@ -1273,17 +1273,15 @@ export class AeroOffice {
 
   /**
    * What the owner is needed for, or null: a question (the `AskUserQuestion` tool, which also covers a permission bubble the same
-   * tool brings) or a permission request. The tool count tells two needs of one kind apart: `currentTool` and the bubble stay until
-   * the next tool or the end of the turn, so the count is what changes when the lead asks again.
+   * tool brings) or a permission request. Two needs of one kind are told apart by a count: a question by the lead's tool starts, a
+   * permission request by the bubble's appearances (a tool start that keeps the bubble is the same request). `currentTool` and the
+   * bubble stay until the next tool or the end of the turn, so the count is what changes when the lead asks again.
    */
   private needOf(ch: Character): string | null {
-    const kind =
-      ch.currentTool === QUESTION_TOOL
-        ? 'question'
-        : ch.bubbleType === 'permission'
-          ? 'permission'
-          : null;
-    return kind === null ? null : `${kind}:${this.os.toolStarts.get(ch.id) ?? 0}`;
+    if (ch.currentTool === QUESTION_TOOL) return `question:${this.os.toolStarts.get(ch.id) ?? 0}`;
+    if (ch.bubbleType === 'permission')
+      return `permission:${this.os.permissionShows.get(ch.id) ?? 0}`;
+    return null;
   }
 
   /** Whether `ch` has been to the tube for the need it has now (so it waits at its desk). */
@@ -1337,10 +1335,19 @@ export class AeroOffice {
     return true;
   }
 
-  /** Starts the walk to the front-most free place of the queue; null when all are taken or none can be reached. */
+  /**
+   * Starts the walk to the first free place of the queue behind every place another tube route holds (so a lead from its desk never
+   * jumps ahead of one still walking to a place); null when none is free or can be reached.
+   */
   private startTube(ch: Character, need: string, queue: Tile[]): Route | null {
     const taken = this.occupied(ch.id, true, false);
+    let behind = 0;
+    for (const [id, other] of this.routes) {
+      if (id !== ch.id && kindOf(other) === 'tube')
+        behind = Math.max(behind, (other.slot ?? 0) + 1);
+    }
     for (const [slot, tile] of queue.entries()) {
+      if (slot < behind) continue;
       if (taken.has(key(tile.col, tile.row))) continue;
       const here = ch.tileCol === tile.col && ch.tileRow === tile.row;
       const walkable = here || this.pathTo(ch, tile).length > 0;
@@ -2082,6 +2089,9 @@ export class AeroOffice {
     }
     for (const id of [...this.os.toolStarts.keys()]) {
       if (!this.os.characters.has(id)) this.os.toolStarts.delete(id);
+    }
+    for (const id of [...this.os.permissionShows.keys()]) {
+      if (!this.os.characters.has(id)) this.os.permissionShows.delete(id);
     }
     // Staff routes, picks and smoke cooldowns of people who are gone are forgotten; lunch starting or ending sends everybody to look again.
     const here = new Set(this.people.map((p) => p.ch.id));

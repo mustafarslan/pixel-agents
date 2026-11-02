@@ -1291,6 +1291,12 @@ export class OfficeState {
    */
   readonly toolStarts = new Map<number, number>();
 
+  /**
+   * Aero: how many times each agent's permission bubble has come on from not being one. A tool start that keeps the bubble is the same
+   * request, so this (not `toolStarts`) tells two permission requests apart. Pruned like `toolStarts`.
+   */
+  readonly permissionShows = new Map<number, number>();
+
   setAgentTool(id: number, tool: string | null): void {
     const ch = this.characters.get(id);
     if (ch) {
@@ -1302,6 +1308,8 @@ export class OfficeState {
   showPermissionBubble(id: number): void {
     const ch = this.characters.get(id);
     if (ch) {
+      if (ch.bubbleType !== 'permission')
+        this.permissionShows.set(id, (this.permissionShows.get(id) ?? 0) + 1);
       ch.bubbleType = 'permission';
       ch.bubbleTimer = 0;
     }

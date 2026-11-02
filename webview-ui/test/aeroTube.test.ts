@@ -345,6 +345,37 @@ test('a question that also brings a permission bubble is one need, one trip', ()
   assert.equal(snap(c.os).tubeSent, 1);
 });
 
+test('a permission request is one trip though a tool starts under its bubble; two requests, and two questions in a row, are two', () => {
+  const c = office(1);
+  const { os } = c;
+  seated(c, 1);
+  askPermission(os, 1);
+  waitFor(os, () => snap(os).tubeSent === 1, 60, 'posted');
+  // An agentToolStart that keeps the bubble (the hook confirmed the permission): the same request.
+  os.setAgentTool(1, 'Agent');
+  os.setAgentTool(1, 'Bash');
+  waitFor(os, () => atDesk(os, 1), 60, 'back');
+  run(os, 20);
+  assert.equal(snap(os).tubeSent, 1, 'no second trip');
+  assert.equal(c.sounds.n, 1);
+  // Cleared and asked again: a second request.
+  newTool(os, 1, 'Edit');
+  run(os, 1);
+  os.showPermissionBubble(1);
+  waitFor(os, () => snap(os).tubeSent === 2, 60, 'second request');
+  waitFor(os, () => atDesk(os, 1), 60, 'back again');
+  // Two questions in a row.
+  newTool(os, 1, QUESTION);
+  waitFor(os, () => snap(os).tubeSent === 3, 60, 'first question');
+  waitFor(os, () => atDesk(os, 1), 60, 'back from it');
+  os.setAgentTool(1, QUESTION);
+  waitFor(os, () => snap(os).tubeSent === 4, 60, 'second question');
+  waitFor(os, () => atDesk(os, 1), 60, 'back from it');
+  run(os, 20);
+  assert.equal(snap(os).tubeSent, 4);
+  assert.equal(c.sounds.n, 4);
+});
+
 test('a new need after the old one ended sends the lead again; so does a different kind or a second question in a row', () => {
   const c = office(1);
   const { os } = c;
@@ -527,6 +558,37 @@ test('three queue in front of the tube and the fourth waits at its desk until a 
   assert.equal(snap(os).tubeSent, 4, 'once each');
 });
 
+test('a lead from its desk takes the place behind one still walking to a place, never ahead of it', () => {
+  const c = office(3);
+  const { os } = c;
+  for (const id of [1, 2, 3]) seated(c, id);
+  const routes = (
+    os.aero as unknown as { routes: Map<number, { arrived?: boolean; slot?: number }> }
+  ).routes;
+  askPermission(os, 1);
+  waitFor(os, () => same(tileOf(os, 1), FRONT), 60, 'the first at the front');
+  askPermission(os, 2);
+  os.update(DT);
+  assert.equal(routes.get(2)?.slot, 1, 'the second takes the place behind');
+  // The first leaves while the second is still on the way to its place.
+  waitFor(
+    os,
+    () => !routes.has(1) && !same(tileOf(os, 1), FRONT) && routes.get(2)?.arrived !== true,
+    20,
+    'the first has left the front while the second is still walking',
+  );
+  assert.equal(routes.get(2)?.arrived, false, 'the second is still walking');
+  askPermission(os, 3);
+  os.update(DT);
+  assert.equal(routes.get(3)?.slot, 2, 'the third is behind the second, not at the free front');
+  waitFor(os, () => snap(os).tubeSent === 3, 120, 'all posted');
+  assert.deepEqual(
+    snap(os).tubePosts.map((p) => p.id),
+    [1, 2, 3],
+    'in order',
+  );
+});
+
 test('the queue is one at the front at a time: two leads never post on one tile together', () => {
   const c = office(3);
   const { os } = c;
@@ -565,6 +627,30 @@ test('while anybody is on the way, the whole queue is reserved; with nobody it i
   }
   // An idle lead's Lounge pick is not on the queue either.
   assert.ok(!taken.has('0,0'));
+});
+
+test('Proton on a spot that is in the queue gives it up when a trip starts', () => {
+  const c = office(1);
+  const { os } = c;
+  seated(c, 1);
+  run(os, 1);
+  const cat = os.aero.proton!;
+  assert.ok(cat, 'Proton is on show');
+  // She stands on the queue's middle tile as an `agent` spot (beside a worker), a long stay.
+  cat.place(QUEUE[1]);
+  cat.spot = 'agent';
+  (cat as unknown as { timer: number }).timer = 100; // mid-stay: she would not move on her own
+  assert.ok(QUEUE.some((t) => same(t, cat.spotTile())));
+  askPermission(os, 1);
+  os.update(DT);
+  assert.equal(tubeRoutes(os).length, 1);
+  os.update(DT);
+  assert.ok(
+    cat.spot === null || !QUEUE.some((t) => same(t, cat.spotTile())),
+    'her spot is not a queue tile any more',
+  );
+  run(os, 3);
+  assert.ok(!QUEUE.some((t) => same(t, { col: cat.col, row: cat.row })), 'she has left the queue');
 });
 
 // ── Not a lead's business, and no tube ────────────────────────────
