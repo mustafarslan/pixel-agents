@@ -11,7 +11,8 @@ import * as collectBurst from './fx/fx/pickups/collect-burst.js';
 import * as poof from './fx/fx/spawn/poof.js';
 import * as countdown from './fx/fx/ui/countdown.js';
 
-export type FxKind = 'burst' | 'countdown' | 'poof';
+/** `steam` (the coffee machine) and `smoke` (the terrace) are the poof in another palette, so a test tells them from a walking-home poof. */
+export type FxKind = 'burst' | 'countdown' | 'poof' | 'steam' | 'smoke';
 
 export const MAX_ACTIVE_FX = 4;
 
@@ -40,10 +41,23 @@ export interface FxSpec {
   options: Record<string, unknown>;
 }
 
+/** A palette of six greys from dark to white, each leaning a little toward (r, g, b). */
+function tinted(r: number, g: number, b: number): string[] {
+  return [0.16, 0.34, 0.55, 0.75, 0.92, 1].map((v) => {
+    const hex = (lean: number): string =>
+      Math.round(Math.min(255, v * 235 + lean))
+        .toString(16)
+        .padStart(2, '0');
+    return `#${hex(r)}${hex(g)}${hex(b)}`;
+  });
+}
+
 export const FX_SPECS: Record<FxKind, FxSpec> = {
   burst: { mod: collectBurst as unknown as FxModule, scale: 0.5, options: {} },
   countdown: { mod: countdown as unknown as FxModule, scale: 0.5, options: {} },
   poof: { mod: poof as unknown as FxModule, scale: 0.5, options: {} },
+  steam: { mod: poof as unknown as FxModule, scale: 0.5, options: { palette: tinted(0, 8, 14) } },
+  smoke: { mod: poof as unknown as FxModule, scale: 0.5, options: { palette: tinted(0, 0, 0) } },
 };
 
 export interface ActiveFx {

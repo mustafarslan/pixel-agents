@@ -256,6 +256,13 @@ export function drawAeroOverlay(
     drawBubble(ctx, text, offsetX + top.x * zoom, offsetY + (top.y - 1) * zoom - up, zoom);
   }
 
+  // Idle staff on a break: the same bubbles, drawn through the people (staff are not among the office's characters).
+  for (const { ch, text } of os.aero.staffBubbles()) {
+    const top = spriteTop(ch);
+    const up = nameFor(os, labels, ch, show) === null ? 0 : lift;
+    drawBubble(ctx, text, offsetX + top.x * zoom, offsetY + (top.y - 1) * zoom - up, zoom);
+  }
+
   // Workers: the activity over a subagent or person at its station, the dots over a person waiting for permission.
   for (const { ch, text } of os.aero.workBubbles()) {
     const top = spriteTop(ch);
