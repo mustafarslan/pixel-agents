@@ -38,6 +38,16 @@ import {
   wallHit,
   whiteboardRect,
 } from './lounge.js';
+import {
+  facingPairs,
+  HUDDLE_BUBBLES,
+  HUDDLE_RETRY_SEC,
+  HUDDLE_SEC,
+  HUDDLE_WALK_SEC,
+  pickPair,
+  trackWorking,
+  type Working,
+} from './meetings.js';
 import { assignFirstNames, lookKey, pickLook, roleFromSlug } from './names.js';
 import {
   ATRIUM_HEAD,
@@ -372,6 +382,16 @@ function fill(w: Worker | Person): Worker {
   return w as Worker;
 }
 
+/** The meeting two subagents of one lead are in: their ids, the seats they hold for it, and when it began and both sat. */
+interface Huddle {
+  subs: [number, number];
+  seats: [string, string];
+  workers: [Worker, Worker];
+  startedAt: number;
+  seatedAt: number | null;
+  bubble: string;
+}
+
 /** A stock subagent at work (one no person stands in for). */
 export interface SubWork extends Worker {
   subId: number;
@@ -482,6 +502,15 @@ export class AeroOffice {
   /** What each stock subagent does, by its type (set when its start names one). */
   private subActivity = new Map<number, Activity>();
   private book: StationBook | null = null;
+  /** The meetings switch (on by default): the self-test turns it off for steps that count on subagents staying at their stations. */
+  meetings = true;
+  /** The meeting running, the subagents that have been in one (by subagent id), and how many have been held. */
+  private huddle: Huddle | null = null;
+  private met = new Set<number>();
+  private huddlesHeld = 0;
+  /** Since when (the tick clock) each subagent has held a station and worked there, by subagent id. */
+  private workingSince = new Map<number, number>();
+  private huddleRetryAt = 0;
   private queued: QueuedSubagent[] = [];
 
   private cachedLayout: unknown = null;
@@ -1873,6 +1902,7 @@ export class AeroOffice {
     this.matchQueued();
     this.watchUpdate(update);
     for (const person of [...this.people]) this.stepPerson(person, dt);
+    this.tendHuddle();
     this.stepProton(dt, update);
     this.fx.update(dt);
     for (const npc of this.npcs) npc.greet = Math.max(0, npc.greet - dt);
@@ -2360,6 +2390,7 @@ export class AeroOffice {
     // A type that arrives after the spawn (the hook's start can come ticks after the transcript's) makes it look again at once.
     const kind = this.subActivity.get(subId);
     const changed = kind !== undefined && kind !== w.activity;
+    const huddled = this.inHuddle(w);
     if (kind !== undefined) w.activity = kind;
     if (changed) {
       w.noBench = null;
@@ -2376,7 +2407,13 @@ export class AeroOffice {
     }
     const permission = ch.bubbleType === 'permission';
     const idle = !ch.isActive && !permission;
-    if (changed && holding() && w.group !== null && !this.chainFor(w, lead).includes(w.group)) {
+    if (
+      changed &&
+      !huddled &&
+      holding() &&
+      w.group !== null &&
+      !this.chainFor(w, lead).includes(w.group)
+    ) {
       this.releaseBench(w, false);
       w.stranded = false;
     }
@@ -2394,6 +2431,8 @@ export class AeroOffice {
         this.releaseBench(w, true);
       }
     }
+    // In a meeting it stays on its seat: the meeting's own rules end it (see `tendHuddle`).
+    if (huddled && w.bench !== null) return;
     if (holding()) {
       const held = this.clock - w.heldAt >= HOLD_SEC;
       if (idle && held && w.idleAt !== null && this.clock - w.idleAt >= IDLE_RELEASE_SEC) {
@@ -2410,6 +2449,224 @@ export class AeroOffice {
     if (this.takeStation(w, lead, this.chainFor(w, lead))) w.stranded = false;
     // No station for a worker that was sitting on one it no longer holds: it may not stay on a tile it doesn't own.
     else if (w.stranded) this.standAside(w);
+  }
+
+  // ── Meetings ─────────────────────────────────────────────────────
+
+  /** The meetings switch (the test hook): turning it off ends a meeting that is running, with no burst. */
+  setMeetings(on: boolean): void {
+    this.meetings = on;
+    if (!on) this.endHuddle(false);
+  }
+
+  private inHuddle(w: Worker): boolean {
+    const h = this.huddle;
+    return h !== null && (h.workers[0] === w || h.workers[1] === w);
+  }
+
+  private seatTile(uid: string): Tile | null {
+    const seat = this.os.seats.get(uid);
+    return seat ? { col: seat.seatCol, row: seat.seatRow } : null;
+  }
+
+  /** Whether the huddle's worker sits on its huddle seat now (arrived, not walking). */
+  private seatedAt(w: Worker, h: Huddle): boolean {
+    const uid = h.seats[h.workers[0] === w ? 0 : 1];
+    const at = this.seatTile(uid);
+    return (
+      at !== null &&
+      w.bench === uid &&
+      w.ch.tileCol === at.col &&
+      w.ch.tileRow === at.row &&
+      w.ch.state === CharacterState.TYPE
+    );
+  }
+
+  private seatedInHuddle(w: Worker): boolean {
+    return this.huddle !== null && this.inHuddle(w) && this.seatedAt(w, this.huddle);
+  }
+
+  /** Every subagent on the floor on show that a meeting could take, by subagent id: stock ones and the people standing in for one. */
+  private siblings(): Map<number, { w: Worker; lead: Character }> {
+    const out = new Map<number, { w: Worker; lead: Character }>();
+    const add = (w: Worker, subId: number, shown: boolean): void => {
+      const meta = this.os.subagentMeta.get(subId);
+      const lead = meta ? this.os.characters.get(meta.parentAgentId) : undefined;
+      if (!shown || !lead || w.ch.matrixEffect) return;
+      out.set(subId, { w, lead });
+    };
+    for (const w of this.subs.values()) add(w, w.subId, !this.hides(w.ch) && !w.ch.aeroHidden);
+    for (const p of this.people) {
+      if (p.subId !== null) add(fill(p), p.subId, this.personOnFloor(p));
+    }
+    return out;
+  }
+
+  /** Whether the worker works at a station it holds and stands or sits at (not walking, not at the cooler, not waiting). */
+  private workingAtStation(w: Worker): boolean {
+    const ch = w.ch;
+    const at = this.tileOf(w);
+    return (
+      ch.isActive &&
+      ch.bubbleType !== 'permission' &&
+      w.cooler === null &&
+      (w.bench !== null || w.prop !== null) &&
+      at !== null &&
+      ch.state === CharacterState.TYPE &&
+      ch.tileCol === at.col &&
+      ch.tileRow === at.row
+    );
+  }
+
+  /**
+   * Once a tick, after the workers were tended: counts who has worked at a station, ends the meeting that must end (a worker gone, not
+   * working, off its seat, or the walk took too long), seats count and the burst, and starts the next meeting when a pair is ready.
+   */
+  private tendHuddle(): void {
+    if (!this.meetings || !this.book || !this.podsInForce() || !this.enabled()) {
+      this.endHuddle(false);
+      this.workingSince.clear();
+      return;
+    }
+    const sibs = this.siblings();
+    for (const id of [...this.met]) if (!this.os.subagentMeta.has(id)) this.met.delete(id);
+    const working = new Set<number>();
+    for (const [id, { w }] of sibs) {
+      if (!this.inHuddle(w) && this.workingAtStation(w)) working.add(id);
+    }
+    trackWorking(this.workingSince, working, this.clock);
+
+    const h = this.huddle;
+    if (h) {
+      let ends = this.clock - h.startedAt >= HUDDLE_WALK_SEC && h.seatedAt === null;
+      for (let i = 0; i < 2 && !ends; i++) {
+        const found = sibs.get(h.subs[i]);
+        const w = h.workers[i];
+        ends =
+          !found ||
+          found.w !== w ||
+          w.bench !== h.seats[i] ||
+          this.borrowed.get(h.seats[i]) !== w ||
+          !w.ch.isActive ||
+          w.ch.bubbleType === 'permission';
+      }
+      if (ends) {
+        this.endHuddle(false);
+        return;
+      }
+      if (h.seatedAt === null && h.workers.every((w) => this.seatedAt(w, h))) {
+        h.seatedAt = this.clock;
+        this.huddlesHeld++;
+        const a = this.seatTile(h.seats[0])!;
+        const b = this.seatTile(h.seats[1])!;
+        this.startFx(
+          'burst',
+          ((a.col + b.col) / 2) * TILE_SIZE + TILE_SIZE / 2,
+          ((a.row + b.row) / 2) * TILE_SIZE + TILE_SIZE / 2 + FX_BURST_DROP,
+        );
+      }
+      if (h.seatedAt !== null && this.clock - h.seatedAt >= HUDDLE_SEC) this.endHuddle(true);
+      return;
+    }
+    if (this.clock < this.huddleRetryAt) return;
+    const ready: Working[] = [];
+    for (const [id, since] of this.workingSince) {
+      const found = sibs.get(id);
+      if (found) ready.push({ id, lead: found.lead.id, since });
+    }
+    const pair = pickPair(ready, this.met, this.clock);
+    if (pair && !this.startHuddle(sibs.get(pair[0])!.w, sibs.get(pair[1])!.w, pair)) {
+      this.huddleRetryAt = this.clock + HUDDLE_RETRY_SEC;
+    }
+  }
+
+  /** Sends the pair to two free meeting seats that face each other. False when there are none (or no walk to them). */
+  private startHuddle(wa: Worker, wb: Worker, subs: [number, number]): boolean {
+    const book = this.book!;
+    const free = book.seats
+      .filter((s) => s.group === 'meeting')
+      .flatMap((s) => {
+        const seat = this.os.seats.get(s.key);
+        return seat && !seat.assigned && !this.borrowed.has(s.key)
+          ? [{ uid: s.key, col: seat.seatCol, row: seat.seatRow, dir: seat.facingDir }]
+          : [];
+      });
+    const taken = this.occupied(-1);
+    const pairs = facingPairs(free).filter(
+      ([x, y]) => !taken.has(key(x.col, x.row)) && !taken.has(key(y.col, y.row)),
+    );
+    let searches = 0;
+    for (const [x, y] of pairs) {
+      if (searches >= CANDIDATES_TRIED) break;
+      const spots = [x, y];
+      const paths: Tile[][] = [];
+      let ok = true;
+      for (const [i, w] of [wa, wb].entries()) {
+        const s = spots[i];
+        const at = w.ch.tileCol === s.col && w.ch.tileRow === s.row;
+        searches++;
+        const path = at ? [] : this.pathTo(w.ch, { col: s.col, row: s.row });
+        if (!at && path.length === 0) {
+          ok = false;
+          break;
+        }
+        paths.push(path);
+      }
+      if (!ok) continue;
+      for (const [i, w] of [wa, wb].entries()) {
+        const s = spots[i];
+        this.assignStation(w, {
+          group: 'meeting',
+          key: s.uid,
+          seat: s.uid,
+          col: s.col,
+          row: s.row,
+          dir: s.dir as Direction,
+        });
+        w.noBench = null;
+        const ch = w.ch;
+        if (paths[i].length > 0) {
+          ch.path = paths[i];
+          ch.moveProgress = 0;
+          ch.state = CharacterState.WALK;
+          ch.frame = 0;
+          ch.frameTimer = 0;
+        } else {
+          this.stand(ch);
+          this.pose(w);
+        }
+      }
+      this.met.add(subs[0]);
+      this.met.add(subs[1]);
+      this.huddle = {
+        subs,
+        seats: [x.uid, y.uid],
+        workers: [wa, wb],
+        startedAt: this.clock,
+        seatedAt: null,
+        bubble:
+          HUDDLE_BUBBLES[Math.floor(this.rng() * HUDDLE_BUBBLES.length) % HUDDLE_BUBBLES.length],
+      };
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * The meeting is over: both seats are let go. After a full meeting each worker looks for a station at once; after an early end one
+   * that still works does too, and one that does not stands up.
+   */
+  private endHuddle(full: boolean): void {
+    const h = this.huddle;
+    if (!h) return;
+    this.huddle = null;
+    for (let i = 0; i < 2; i++) {
+      const w = h.workers[i];
+      if (w.bench !== h.seats[i]) continue;
+      const works = w.ch.isActive && w.ch.bubbleType !== 'permission';
+      this.releaseBench(w, !full && !works);
+      w.noBench = null;
+    }
   }
 
   /** What decides whether a station search can find something new: the seats taken, the stations borrowed, the routes, the lead's seat. */
@@ -3041,7 +3298,10 @@ export class AeroOffice {
       }
       const at = w.bench !== null || w.prop !== null;
       if (ch.bubbleType !== null || !ch.isActive || !at || ch.state !== CharacterState.TYPE) return;
-      out.push({ ch, text: ACTIVITY_BUBBLE[w.activity] });
+      out.push({
+        ch,
+        text: this.seatedInHuddle(w) ? this.huddle!.bubble : ACTIVITY_BUBBLE[w.activity],
+      });
     };
     for (const p of this.people) {
       if (p.subId !== null && this.personOnFloor(p)) add(fill(p), true);
@@ -3142,6 +3402,23 @@ export class AeroOffice {
         }),
       hidden: [...this.os.characters.values()].filter((c) => c.aeroHidden).map((c) => c.id),
       fxStarted: { ...this.fx.started },
+      meetingsOn: this.meetings,
+      huddle: this.huddle
+        ? {
+            subs: [...this.huddle.subs],
+            seats: [...this.huddle.seats],
+            seated: this.huddle.workers.filter((w) => this.seatedAt(w, this.huddle!)).length,
+            left: Math.max(
+              0,
+              Math.round(
+                (HUDDLE_SEC -
+                  (this.huddle.seatedAt === null ? 0 : this.clock - this.huddle.seatedAt)) *
+                  10,
+              ) / 10,
+            ),
+          }
+        : null,
+      huddlesHeld: this.huddlesHeld,
       badges: Object.fromEntries(this.badgeCounts()),
       npcs: this.npcs.map((n) => ({
         role: n.role,
@@ -3262,6 +3539,12 @@ export interface AeroSnapshot {
     cooler: boolean;
   }>;
   hidden: number[];
+  /** Whether subagent meetings may happen (the self-test turns them off for some steps). */
+  meetingsOn: boolean;
+  /** The meeting running: the two subagent ids, the two seats, how many are seated, and the seconds left (a whole 8 until both sit). */
+  huddle: { subs: [number, number]; seats: [string, string]; seated: number; left: number } | null;
+  /** How many meetings have been held (counted when both sat). */
+  huddlesHeld: number;
   /** How many effects of each kind have started (counted, so a short one isn't missed by a poll). */
   fxStarted: Record<string, number>;
   badges: Record<string, number>;

@@ -133,6 +133,8 @@ declare global {
       } | null>;
       /** Aero's routing state: the last accepted update, the Lounge, routes, configured characters, hidden subs, badges. */
       getAero?: () => AeroSnapshot | null;
+      /** Aero's subagent meetings, on or off (on by default): the self-test turns them off for steps that count on subagents staying put. */
+      setAeroMeetings?: (on: boolean) => void;
     };
   }
 }
@@ -185,6 +187,10 @@ export function installTestHooks(officeStateRef: { current: OfficeState | null }
   hooks.getCameraFollowId = () => officeStateRef.current?.cameraFollowId ?? null;
 
   hooks.getAero = () => officeStateRef.current?.aero.snapshot() ?? null;
+
+  hooks.setAeroMeetings = (on) => {
+    officeStateRef.current?.aero.setMeetings(on === true);
+  };
 
   hooks.getCatalogEntries = (ids) =>
     ids.map((id) => {
