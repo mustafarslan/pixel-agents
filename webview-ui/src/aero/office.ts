@@ -2591,7 +2591,7 @@ export class AeroOffice {
           ? [{ uid: s.key, col: seat.seatCol, row: seat.seatRow, dir: seat.facingDir }]
           : [];
       });
-    const taken = this.occupied(-1);
+    const taken = this.occupied(Number.NaN);
     const pairs = facingPairs(free).filter(
       ([x, y]) => !taken.has(key(x.col, x.row)) && !taken.has(key(y.col, y.row)),
     );
@@ -2654,7 +2654,8 @@ export class AeroOffice {
 
   /**
    * The meeting is over: both seats are let go. After a full meeting each worker looks for a station at once; after an early end one
-   * that still works does too, and one that does not stands up.
+   * that still works does too, one waiting for permission stays where it is, and an idle one goes to its pod's water cooler (else
+   * stands aside).
    */
   private endHuddle(full: boolean): void {
     const h = this.huddle;
@@ -2663,9 +2664,19 @@ export class AeroOffice {
     for (let i = 0; i < 2; i++) {
       const w = h.workers[i];
       if (w.bench !== h.seats[i]) continue;
-      const works = w.ch.isActive && w.ch.bubbleType !== 'permission';
-      this.releaseBench(w, !full && !works);
+      const permission = w.ch.bubbleType === 'permission';
+      const works = w.ch.isActive && !permission;
       w.noBench = null;
+      if (full || works || permission) {
+        // A full meeting or a worker still at work looks for a station at once; one waiting for permission stays where it is.
+        this.releaseBench(w, false);
+        continue;
+      }
+      // Idle: as after its idle wait at a station, the pod's water cooler, else it stands aside.
+      const meta = this.os.subagentMeta.get(h.subs[i]);
+      const lead = meta ? this.os.characters.get(meta.parentAgentId) : undefined;
+      if (lead) this.goToCooler(w, lead);
+      else this.releaseBench(w, true);
     }
   }
 

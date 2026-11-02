@@ -350,12 +350,41 @@ test('the bubble is one of 💬 🤝 🗣️, picked by the office’s rng, and 
   for (const v of [0.0, 0.5, 0.99]) {
     const os = floor();
     os.aero.rng = fixed(v);
-    const [a, b] = pair(os);
+    const [a] = pair(os);
     until(os, () => huddle(os) !== null, 90, 'a meeting');
-    const walking = os.aero.workBubbles().filter((x) => [a.id, b.id].includes(x.ch.id));
-    for (const x of walking)
-      assert.ok(!HUDDLE_BUBBLES.includes(x.text as never), 'not while walking');
-    until(os, bothSeated(os), 60, 'seated');
+    // Every tick: a member shows the meeting bubble exactly when it sits on its meeting chair (never on the way, never an activity one).
+    let walkingTicks = 0;
+    let seatedTicks = 0;
+    until(
+      os,
+      () => {
+        const h = huddle(os)!;
+        for (const [i, id] of h.subs.entries()) {
+          const c = os.characters.get(id)!;
+          const at = os.seats.get(h.seats[i])!;
+          const seated =
+            sub(os, id).seat === h.seats[i] &&
+            c.state === CharacterState.TYPE &&
+            c.tileCol === at.seatCol &&
+            c.tileRow === at.seatRow;
+          const text = os.aero.workBubbles().find((x) => x.ch.id === id)?.text;
+          if (seated) {
+            seatedTicks++;
+            assert.ok((HUDDLE_BUBBLES as readonly string[]).includes(text ?? ''), 'seated: 💬');
+          } else {
+            walkingTicks++;
+            assert.ok(
+              !(HUDDLE_BUBBLES as readonly string[]).includes(text ?? ''),
+              `not while walking (state ${c.state})`,
+            );
+          }
+        }
+        return bothSeated(os)();
+      },
+      60,
+      'seated',
+    );
+    assert.ok(walkingTicks > 0 && seatedTicks > 0, 'it saw them both walk and sit');
     texts.push(os.aero.workBubbles().find((x) => x.ch.id === a.id)!.text);
   }
   assert.deepEqual(texts, ['\u{1F4AC}', '\u{1F91D}', '\u{1F5E3}\u{FE0F}']);
@@ -577,10 +606,14 @@ test('the switch: off, nobody meets; turned off mid-meeting it ends with no burs
   assert.equal(huddle(os), null);
   assert.equal(held(os), 0);
   os.aero.setMeetings(true);
-  until(os, () => huddle(os) !== null, 20, 'they meet once it is on');
+  until(os, bothSeated(os), 120, 'they meet once it is on, both sit');
+  assert.equal(bursts(os), 1);
   os.aero.setMeetings(false);
+  assert.equal(huddle(os), null, 'turned off mid-meeting, after both sat: it ends');
+  run(os, 20);
+  assert.equal(bursts(os), 1, 'no further burst');
+  assert.equal(held(os), 1);
   assert.equal(huddle(os), null);
-  assert.equal(bursts(os), 0);
 });
 
 test('the Rooms style (no pods in force) has no meetings', () => {
@@ -624,5 +657,120 @@ test('an overflow worker on a meeting chair still moves up to a better station w
   // A pod bench frees: the one on the meeting chair (the worst tier) moves up, meeting or not.
   const pod = subs.find((s) => [WOOD_A, WOOD_B].includes(sub(os, s.id).seat ?? ''))!;
   os.removeSubagent(1, pod.tool);
-  until(os, () => !MEETING.includes(sub(os, onChair.id).seat ?? 'x'), 60, 'it moved up');
+  until(
+    os,
+    () => {
+      assert.ok(
+        !huddle(os)?.subs.includes(onChair.id),
+        'it moves up by itself, not through a huddle',
+      );
+      const seat = sub(os, onChair.id).seat;
+      return seat !== null && !MEETING.includes(seat);
+    },
+    60,
+    'it holds a better seat',
+  );
+  assert.ok(sub(os, onChair.id).station);
+});
+
+// ── The fix round ──────────────────────────────────────────────────
+
+test('subagent -1 (the first one) standing on a meeting chair makes that pair not free', () => {
+  const os = floor();
+  os.aero.setMeetings(false);
+  const first = spawn(os, 'general-purpose');
+  assert.equal(first.id, -1, 'the first subagent of the world');
+  const [a, b] = pair(os);
+  until(os, bothAtStations(os, [first.id, a.id, b.id]), 120, 'all at stations');
+  // Only the first row has two free chairs; the first subagent stands on its left chair's tile.
+  for (const uid of ROW2) os.seats.get(uid)!.assigned = true;
+  const chair = os.seats.get(ROW1[0])!;
+  const c = os.characters.get(first.id)!;
+  c.tileCol = chair.seatCol;
+  c.tileRow = chair.seatRow;
+  const inner = os.aero as unknown as {
+    subs: Map<number, unknown>;
+    startHuddle(x: unknown, y: unknown, ids: [number, number]): boolean;
+  };
+  const wa = inner.subs.get(a.id);
+  const wb = inner.subs.get(b.id);
+  assert.equal(inner.startHuddle(wa, wb, [a.id, b.id]), false, 'its own tile is not exempt');
+  assert.equal(huddle(os), null);
+  c.tileCol = chair.seatCol + 3;
+  assert.equal(inner.startHuddle(wa, wb, [a.id, b.id]), true, 'free once it stands elsewhere');
+});
+
+test('an idle worker leaving the meeting early goes to its pod’s cooler, as after its idle wait', () => {
+  const os = floor();
+  const [a, b] = pair(os);
+  until(os, bothSeated(os), 120, 'seated');
+  os.setAgentActive(a.id, false);
+  run(os, 0.3);
+  assert.equal(huddle(os), null);
+  assert.equal(sub(os, a.id).cooler, true, 'sent to the cooler');
+  assert.equal(sub(os, a.id).station, false, 'holds nothing');
+  until(os, () => os.characters.get(a.id)!.state === CharacterState.IDLE, 30, 'at the cooler');
+  const c = os.characters.get(a.id)!;
+  const at = [c.tileCol, c.tileRow];
+  run(os, 15);
+  assert.deepEqual([c.tileCol, c.tileRow], at, 'it stays there; no wandering');
+  assert.equal(sub(os, a.id).cooler, true);
+  until(
+    os,
+    () => sub(os, b.id).seat !== null && !MEETING.includes(sub(os, b.id).seat!),
+    40,
+    'the other is back at a station',
+  );
+});
+
+test('an idle worker leaving the meeting early stands aside when its pod has no cooler', () => {
+  const os = floor();
+  const [a] = pair(os);
+  (os.aero as unknown as { book: { coolers: unknown[] } }).book.coolers = [];
+  until(os, bothSeated(os), 120, 'seated');
+  os.setAgentActive(a.id, false);
+  run(os, 0.3);
+  assert.equal(huddle(os), null);
+  assert.equal(sub(os, a.id).cooler, false);
+  assert.equal(sub(os, a.id).station, false);
+});
+
+test('a worker with a permission bubble leaving the meeting early stays where it is', () => {
+  const os = floor();
+  const [a] = pair(os);
+  until(os, bothSeated(os), 120, 'seated');
+  const c = os.characters.get(a.id)!;
+  const at = [c.tileCol, c.tileRow];
+  os.showPermissionBubble(a.id);
+  os.update(DT);
+  assert.equal(huddle(os), null, 'the meeting ended');
+  assert.deepEqual([c.tileCol, c.tileRow], at);
+  assert.equal(c.state, CharacterState.TYPE, 'no walk to a free tile');
+  assert.equal(c.path.length, 0);
+});
+
+test('a person standing in for subagent A that met, then for a new subagent B, can still meet: keyed by subagent id', () => {
+  const os = floor(staff('reviewer'));
+  spawn(os, 'general-purpose');
+  const first = spawn(os, 'reviewer');
+  run(os, MATRIX_EFFECT_DURATION + 0.5);
+  const p = person(os, first.id);
+  assert.ok(p, 'a person stands in for the first reviewer');
+  until(os, () => held(os) === 1, 150, 'the first meeting');
+  until(os, () => huddle(os) === null, 30, 'it ends');
+  // The reviewer subagent ends; the same person then stands in for a new one, with a new subagent id.
+  os.removeSubagent(1, first.tool);
+  run(os, MATRIX_EFFECT_DURATION + 1);
+  const next = spawn(os, 'reviewer');
+  const mate = spawn(os, 'general-purpose');
+  run(os, MATRIX_EFFECT_DURATION + 0.5);
+  assert.notEqual(next.id, first.id);
+  assert.ok(person(os, next.id), 'a person stands in for the new reviewer');
+  assert.equal(person(os, next.id).ch.id, p.ch.id, 'the same character');
+  until(os, () => huddle(os) !== null, 150, 'the second meeting');
+  assert.deepEqual([...huddle(os)!.subs].sort(), [next.id, mate.id].sort());
+  until(os, () => held(os) === 2, 60, 'held');
+  until(os, () => huddle(os) === null, 30, 'it ends');
+  run(os, 40);
+  assert.equal(held(os), 2, 'nobody meets twice');
 });
