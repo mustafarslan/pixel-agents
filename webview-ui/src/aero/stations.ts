@@ -151,7 +151,8 @@ export function buildStations(os: OfficeState): StationBook {
         col: t.col,
         row: t.row,
         dir: Direction.UP,
-        zone,
+        // The room of the front tile: a wall-mounted machine (the Fun room's vending) stands on an unlabelled top-left tile.
+        zone: zoneAt(t.col, t.row),
       }));
     if (f.type === COFFEE_TYPE) book.breaks.coffee.push(...front());
     else if (f.type === VENDING_TYPE) book.breaks.vending.push(...front());

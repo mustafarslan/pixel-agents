@@ -782,6 +782,11 @@ export class AeroOffice {
       this.proton = cat;
     }
     if (cat.seat !== null && !this.napFree(cat.seat)) cat.giveUp();
+    // A café or sun spot somebody stands on or is walking to (a break) is not hers: she gives up as she does for a seat.
+    else if (cat.spot === 'cafe' || cat.spot === 'sun') {
+      const at = cat.spotTile();
+      if (this.occupied(Number.NaN).has(key(at.col, at.row))) cat.giveUp();
+    }
     cat.update(dt, this.protonWorld(update));
   }
 
@@ -1306,14 +1311,21 @@ export class AeroOffice {
     if (!route.arrived) phase = 'walking';
     else if (route.seatUid !== null && kind === 'coffee') phase = 'bar';
     else if (route.seatUid !== null && kind === 'lunch') phase = 'seat';
-    return { kind, phase, col: route.target.col, row: route.target.row, seat: route.seatUid };
+    return {
+      kind,
+      phase,
+      col: route.target.col,
+      row: route.target.row,
+      seat: route.seatUid ?? route.next?.seatUid ?? null,
+    };
   }
 
   /** The break places of `kind` that `ch` could take now, nearest first; each stage's tile is free and none is a seat somebody holds. */
   private plansFor(ch: Character, kind: BreakKind | 'lunch', staff: boolean): Plan[] {
     const os = this.os;
     const book = this.book;
-    if (!book) return [];
+    // Breaks are the open office's: in the Rooms style a room named Café or Terrace is a worktree's, and its benches are no bar.
+    if (!book || !this.podsInForce()) return [];
     const b = book.breaks;
     const taken = this.occupied(ch.id);
     const dist = (a: Tile, from: Tile = { col: ch.tileCol, row: ch.tileRow }): number =>
@@ -1332,6 +1344,17 @@ export class AeroOffice {
           !!seat && !seat.assigned && !this.borrowed.has(t.key) && !taken.has(key(t.col, t.row))
         );
       });
+    // Whether a seat can be walked to from a counter or machine front (a walled-off stool is no second stage).
+    const reach = (from: Tile, to: Tile): boolean => {
+      if (from.col === to.col && from.row === to.row) return true;
+      const k = key(to.col, to.row);
+      const wasBlocked = os.blockedTiles.delete(k);
+      const path = findPath(from.col, from.row, to.col, to.row, os.tileMap, os.blockedTiles);
+      if (wasBlocked) os.blockedTiles.add(k);
+      return path.length > 0;
+    };
+    const seatFrom = (list: BreakSpot[], front: Tile): BreakSpot | undefined =>
+      nearest(list, front).find((s) => reach(front, s));
     const stage = (
       spot: BreakSpot,
       timer: number,
@@ -1378,7 +1401,7 @@ export class AeroOffice {
       case 'coffee': {
         const stools = seats(b.bar);
         return fronts(b.coffee).flatMap((front) => {
-          const stool = nearest(stools, front)[0];
+          const stool = seatFrom(stools, front);
           return stool
             ? [
                 {
@@ -1419,13 +1442,19 @@ export class AeroOffice {
         if (places.length === 0) return [];
         // The buffet first when a counter tile is free, then the seat nearest it; both reserved from the start.
         const counters = fronts(b.buffet);
-        if (counters.length > 0) {
-          return counters.map((front) => ({
-            kind,
-            ...stage(front, BUFFET_SEC, food),
-            next: stage(nearest(places, front)[0], Number.POSITIVE_INFINITY, food),
-          }));
-        }
+        const buffet = counters.flatMap((front) => {
+          const seat = seatFrom(places, front);
+          return seat
+            ? [
+                {
+                  kind,
+                  ...stage(front, BUFFET_SEC, food),
+                  next: stage(seat, Number.POSITIVE_INFINITY, food),
+                } as Plan,
+              ]
+            : [];
+        });
+        if (buffet.length > 0) return buffet;
         return nearest(places).map((spot) => ({
           kind,
           next: null,
@@ -1550,7 +1579,7 @@ export class AeroOffice {
     const ch = person.ch;
     const route = this.staffRoutes.get(ch.id);
     if (route) {
-      if (update === null || (route.mode === 'lunch' && !update.lunch)) {
+      if (update === null || route.mode !== (update.lunch ? 'lunch' : 'rest')) {
         this.endBreak(ch, true);
         step();
         return;
@@ -1835,7 +1864,9 @@ export class AeroOffice {
     const lunch = update?.lunch === true;
     if (lunch !== this.lunchWas) {
       this.lunchWas = lunch;
-      for (const id of this.pickAt.keys()) this.pickAt.set(id, this.clock);
+      // Lunch starting picks at once; lunch ending waits a pick's time like any other.
+      for (const id of this.pickAt.keys())
+        this.pickAt.set(id, lunch ? this.clock : this.nextPick());
     }
     this.sweepSubs();
     this.reconcilePeople(update);
@@ -2056,7 +2087,11 @@ export class AeroOffice {
     // Not on the floor on show: it stands where it is, unseen, and holds no bench.
     if (!this.personOnFloor(person)) {
       this.releaseBench(person, false);
-      this.dropStaffRoute(ch.id);
+      // A break cut short stands where it is: it must not come back and finish a stale path to a tile nobody holds.
+      if (this.staffRoutes.has(ch.id)) {
+        this.dropStaffRoute(ch.id);
+        this.stand(ch);
+      }
       return;
     }
     // Home it wanders over the Lounge floor only; away it works at a station, else types where it stopped.

@@ -815,6 +815,13 @@ export class Proton {
     this.setMode('sit');
   }
 
+  /** The tile of the spot she walks to or stands at. */
+  spotTile(): Tile {
+    return this.path.length > 0
+      ? this.path[this.path.length - 1]
+      : { col: this.col, row: this.row };
+  }
+
   private setMode(mode: ProtonMode): void {
     if (this.mode !== mode) this.clock = 0;
     this.mode = mode;

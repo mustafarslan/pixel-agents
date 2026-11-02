@@ -137,6 +137,8 @@ interface WorldOptions {
   coffee?: { col: number; row: number };
   /** No dining tables: only the four bar stools are café seats. */
   noDining?: boolean;
+  /** Tiles that are walls, to wall a seat off. */
+  walls?: Array<{ col: number; row: number }>;
 }
 
 function buildWorld(opts: WorldOptions = {}): OfficeState {
@@ -205,15 +207,24 @@ function buildWorld(opts: WorldOptions = {}): OfficeState {
   zone('Lounge', 29, 39, 18, 25);
   zone('Reception', 29, 39, 26, 34);
   zone('Fun', 40, 52, 18, 34);
+  // As in Aero's layout: the Fun room's wall at (42..50, 18..19) carries its vending machine, and the wall is unlabelled.
+  const tiles = new Array<TileType>(COLS * ROWS).fill(TileType.FLOOR_1);
+  for (let r = 18; r <= 19; r++) {
+    for (let c = 42; c <= 50; c++) {
+      tiles[r * COLS + c] = TileType.WALL;
+      areaTiles[r * COLS + c] = null;
+    }
+  }
   for (const uid of LOUNGE_SOFAS) {
     const piece = furniture.find((p) => p.uid === uid)!;
     areaTiles[piece.row * COLS + piece.col] = null; // the Lounge's seats are unlabelled
   }
+  for (const w of opts.walls ?? []) tiles[w.row * COLS + w.col] = TileType.WALL;
   const layout: OfficeLayout = {
     version: 1,
     cols: COLS,
     rows: ROWS,
-    tiles: new Array<TileType>(COLS * ROWS).fill(TileType.FLOOR_1),
+    tiles,
     furniture,
     areas: [
       'Pod 1',
@@ -938,4 +949,239 @@ test('a seeded day: several kinds of break happen, every target distinct, on its
     assert.ok(s.smokers <= 2);
   }
   assert.ok(kinds.size >= 3, `kinds seen: ${[...kinds].join(',')}`);
+});
+
+// ── The fix round ──────────────────────────────────────────────────
+
+const priv = (os: OfficeState) =>
+  os.aero as unknown as {
+    pickBreak(ch: unknown, staff: boolean): boolean;
+    pickAt: Map<number, number>;
+    clock: number;
+    proton: {
+      spot: string | null;
+      col: number;
+      row: number;
+      timer: number;
+      place(t: { col: number; row: number }): void;
+      spotTile(): { col: number; row: number };
+    } | null;
+  };
+
+test('F1: a prop’s room is the room of its front tile: the Fun room’s vending machine on the unlabelled wall is the Fun room’s', () => {
+  const os = buildWorld();
+  const vending = buildStations(os).breaks.vending;
+  const fun = vending.find((v) => key(v) === key(VENDING_FRONTS[1]))!;
+  assert.equal(fun.zone, 'Fun');
+  assert.equal(vending.find((v) => key(v) === key(VENDING_FRONTS[0]))!.zone, 'Hall');
+});
+
+test('F2: in the Rooms style (no pods in force) a room named Café or Terrace gives no break and no café lunch', () => {
+  const os = buildWorld();
+  os.aero.rng = fixed(0.2);
+  os.addAgent(1, 0, 0, LEAD_SEATS[0], true, FA);
+  // No `pods` key at all: the Rooms style.
+  const rooms = (lunch: boolean): Record<string, unknown> => {
+    const u = upd(FA, STAFF_A.slice(0, 2), { lunch });
+    delete u['pods'];
+    return u;
+  };
+  assert.ok(setAeroUpdate(rooms(false)));
+  run(os, MATRIX_EFFECT_DURATION + 0.5);
+  os.setAgentActive(1, false);
+  for (const lunch of [false, true]) {
+    assert.ok(setAeroUpdate(rooms(lunch)));
+    for (let t = 0; t < 120; t += DT) {
+      os.update(DT);
+      const s = snap(os);
+      for (const r of [...s.leads.map((l) => l.routine), ...s.people.map((p) => p.routine)]) {
+        if (r) assert.equal(r.kind, 'lounge', `no ${r.kind} outside the open office`);
+      }
+    }
+  }
+  assert.equal(os.aero.staffRoutes.size, 0);
+});
+
+test('F3: a staff member taken off the floor mid-break stands where it is; back on the floor it walks nowhere stale', () => {
+  const os = office({ agents: STAFF_A.slice(0, 1), rng: fixed(0.05) });
+  const p = os.aero.people[0];
+  waitFor(
+    os,
+    () => staffNamed(os, 'reviewer').routine?.phase === 'walking' && p.ch.path.length > 0,
+    90,
+    'on the way to the cooler',
+  );
+  assert.ok(setAeroUpdate(upd(FB, STAFF_A.slice(0, 1))));
+  os.update(DT);
+  assert.equal(os.aero.staffRoutes.size, 0);
+  assert.equal(p.ch.path.length, 0, 'the stale path is gone');
+  assert.notEqual(p.ch.state, CharacterState.WALK);
+  assert.ok(setAeroUpdate(upd(FA, STAFF_A.slice(0, 1))));
+  os.update(DT);
+  if (os.aero.staffRoutes.size === 0) assert.equal(p.ch.path.length, 0, 'it does not finish it');
+});
+
+test('F4: the snapshot names the seat kept for the second stage while the first is walked, and the seat is one that can be reached', () => {
+  // The stool nearest the machine and the buffet is walled in.
+  const walls = [
+    { col: 10, row: 24 },
+    { col: 11, row: 23 },
+    { col: 11, row: 25 },
+  ];
+  const os = office({ leads: 1, rng: fixed(0.9), opts: { walls } });
+  waitFor(os, () => os.aero.routes.get(1)?.arrived === true, 80, 'arrival');
+  os.aero.rng = fixed(0.2);
+  assert.equal(priv(os).pickBreak(os.characters.get(1), false), true);
+  os.aero.rng = fixed(0.9);
+  const v = lead(os, 1).routine!;
+  assert.equal(v.kind, 'coffee');
+  assert.equal(v.phase, 'walking');
+  const kept = os.aero.routes.get(1)!.next!;
+  assert.equal(v.seat, kept.seatUid, 'the reserved seat is reported');
+  assert.notEqual(v.seat, null);
+  assert.notDeepEqual(kept.target, BAR[0], 'not the walled-in stool');
+  assert.ok(inList(BAR, kept.target));
+  // The lunch at the buffet keeps a reachable seat too.
+  const lunchOs = office({ leads: 1, lunch: true, rng: seeded(4), opts: { walls } });
+  lunchOs.update(DT);
+  const first = lunchOs.aero.routes.get(1)!;
+  assert.equal(first.kind, 'lunch');
+  assert.equal(lead(lunchOs, 1).routine!.seat, first.next!.seatUid);
+  assert.notDeepEqual(first.next!.target, BAR[0]);
+});
+
+test('F5: Proton gives up a café spot that a break route has taken, standing on it or heading to it', () => {
+  for (const walking of [false, true]) {
+    const os = office({ leads: 1, rng: fixed(0.9) });
+    waitFor(os, () => os.aero.routes.get(1)?.arrived === true, 80, 'arrival');
+    const cat = priv(os).proton!;
+    assert.ok(cat, 'she is on show');
+    const back = { col: COFFEE_FRONT.col, row: COFFEE_FRONT.row + 1 };
+    cat.place(walking ? back : COFFEE_FRONT);
+    const inner = cat as unknown as { spot: string | null; timer: number; path: unknown[] };
+    inner.spot = 'cafe';
+    inner.timer = 1000;
+    if (walking) inner.path = [{ ...COFFEE_FRONT }];
+    os.aero.rng = fixed(0.2);
+    assert.equal(priv(os).pickBreak(os.characters.get(1), false), true);
+    os.aero.rng = fixed(0.9);
+    assert.deepEqual(os.aero.routes.get(1)!.target, COFFEE_FRONT);
+    os.update(DT);
+    const on = cat.spot === 'cafe' && key(cat.spotTile()) === key(COFFEE_FRONT);
+    assert.equal(on, false, `she let go of the coffee front (walking: ${walking})`);
+  }
+});
+
+test('F6a: a rest break ends when lunch starts', () => {
+  const os = office({ agents: STAFF_A.slice(0, 1), rng: fixed(0.2) });
+  waitFor(os, () => staffNamed(os, 'reviewer').routine?.phase === 'bar', 120, 'on the stool');
+  assert.ok(setAeroUpdate(upd(FA, STAFF_A.slice(0, 1), { lunch: true })));
+  os.update(DT);
+  os.update(DT);
+  for (const r of os.aero.staffRoutes.values()) assert.equal(r.mode, 'lunch', 'no rest route left');
+});
+
+test('F6b: when lunch ends, the idle pick a pick’s time away, not at once', () => {
+  const os = office({ agents: STAFF_A.slice(0, 1), rng: fixed(0.2) });
+  const o = priv(os) as unknown as {
+    lunchWas: boolean;
+    pickAt: Map<number, number>;
+    clock: number;
+  };
+  // Lunch was on, and has just ended; the person is idle with a pick far off.
+  o.lunchWas = true;
+  for (const id of o.pickAt.keys()) o.pickAt.set(id, o.clock + 1000);
+  os.update(DT);
+  assert.equal(os.aero.staffRoutes.size, 0, 'no break started at once');
+  assert.ok(o.pickAt.size > 0);
+  for (const at of o.pickAt.values()) {
+    assert.ok(at - o.clock >= PICK_MIN_SEC - 0.5, `the next pick is ${at - o.clock} s away`);
+  }
+});
+
+test('F8: a contractor takes no break, however long it is idle', () => {
+  const os = office({ leads: 1, agents: [person('reviewer', FA)], rng: fixed(0.05) });
+  os.setAgentActive(1, true);
+  const tools = ['tool-a', 'tool-b'];
+  for (const tool of tools) {
+    os.addSubagent(1, tool);
+    assert.equal(os.aero.subagentStarted(1, tool, 'Subtask: reviewer'), true);
+  }
+  run(os, MATRIX_EFFECT_DURATION + 2);
+  const contractor = os.aero.people.find((x) => x.contractor);
+  assert.ok(contractor, 'a contractor was hired');
+  for (const tool of tools) os.removeSubagent(1, tool);
+  let personBroke = false;
+  for (let t = 0; t < 100; t += DT) {
+    os.update(DT);
+    assert.equal(os.aero.staffRoutes.has(contractor.ch.id), false, 'the contractor has no route');
+    if (os.aero.people.some((x) => !x.contractor && os.aero.staffRoutes.has(x.ch.id)))
+      personBroke = true;
+  }
+  assert.ok(personBroke, 'the roster person, idle in the same time, did take a break');
+});
+
+test('F8: a break never targets a pod cooler a worker holds, and never moves that worker', () => {
+  for (const slug of ['general-purpose', 'reviewer']) {
+    const os = office({
+      leads: 2,
+      agents: [person('reviewer', FA)],
+      rng: fixed(0.9),
+    });
+    os.setAgentActive(1, true);
+    const subId = os.addSubagent(1, 'tool-w');
+    os.aero.subagentStarted(1, 'tool-w', `Subtask: ${slug}`);
+    os.setAgentTool(subId, 'Subtask');
+    os.setAgentActive(subId, true);
+    run(os, MATRIX_EFFECT_DURATION + 8);
+    os.setAgentActive(subId, false);
+    const sub = () =>
+      os.aero.people.find((x) => x.subId === subId)?.ch ?? os.characters.get(subId)!;
+    waitFor(
+      os,
+      () => key({ col: sub().tileCol, row: sub().tileRow }) === key(COOLER_FRONT),
+      60,
+      `${slug} at the cooler`,
+    );
+    os.aero.rng = fixed(0.05);
+    for (let t = 0; t < 150; t += DT) {
+      os.update(DT);
+      assert.deepEqual(
+        { col: sub().tileCol, row: sub().tileRow },
+        COOLER_FRONT,
+        `${slug} stays at the cooler`,
+      );
+      for (const l of snap(os).leads) assert.notEqual(l.routine?.kind, 'cooler');
+      for (const q of snap(os).people) assert.notEqual(q.routine?.kind, 'cooler');
+    }
+  }
+});
+
+test('F8: a cooler reserved for a worker or a person on its way is not offered to a break', () => {
+  for (const holder of ['person', 'worker']) {
+    const os = office({ leads: 2, agents: [person('reviewer', FA)], rng: fixed(0.9) });
+    os.setAgentActive(1, true);
+    const subId = os.addSubagent(1, 'tool-h');
+    os.aero.subagentStarted(
+      1,
+      'tool-h',
+      holder === 'person' ? 'Subtask: reviewer' : 'Subtask: general-purpose',
+    );
+    os.setAgentTool(subId, 'Subtask');
+    os.setAgentActive(subId, true);
+    run(os, MATRIX_EFFECT_DURATION + 8);
+    const held = { ...COOLER_FRONT };
+    const p = os.aero.people.find((x) => x.subId === subId);
+    const w = (os.aero as unknown as { subs: Map<number, { cooler: unknown }> }).subs.get(subId);
+    if (holder === 'person') p!.cooler = held;
+    else (w as { cooler: unknown }).cooler = held;
+    const mover = p?.ch ?? os.characters.get(subId)!;
+    const at = () => ({ col: mover.tileCol, row: mover.tileRow });
+    const before = at();
+    const plans = (
+      os.aero as unknown as { plansFor(ch: unknown, k: string, staff: boolean): unknown[] }
+    ).plansFor(os.characters.get(2), 'cooler', false);
+    assert.equal(plans.length, 0, `${holder}: its cooler is not offered`);
+    assert.deepEqual(at(), before, 'and nobody is moved');
+  }
 });
