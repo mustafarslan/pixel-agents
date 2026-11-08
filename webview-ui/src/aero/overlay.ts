@@ -13,6 +13,8 @@ import {
   AERO_BUBBLE_BORDER,
   AERO_BUBBLE_FILL,
   AERO_BUBBLE_TEXT,
+  AERO_CAPSULE_BRASS,
+  AERO_CAPSULE_GLASS,
   AERO_NAME_SHADOW,
   AERO_NAME_TEXT,
   AERO_PLATE_BORDER,
@@ -22,6 +24,7 @@ import {
 import { sittingOffsetPx } from '../office/engine/characters.js';
 import type { OfficeState } from '../office/engine/officeState.js';
 import type { Character } from '../office/types.js';
+import { TILE_SIZE } from '../office/types.js';
 import { drawEffects } from './effects.js';
 import { fitCached } from './fit.js';
 import { drawFloorSign } from './floorSign.js';
@@ -164,6 +167,28 @@ function drawName(
   ctx.fillText(text, cx, bottom);
 }
 
+/** A tower handoff's capsule: 6 by 4 world pixels, brass with a glass window, centred on (x, y) (world pixels). */
+function drawCapsule(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  offsetX: number,
+  offsetY: number,
+  zoom: number,
+): void {
+  const left = Math.round(offsetX + (x - 3) * zoom);
+  const top = Math.round(offsetY + (y - 2) * zoom);
+  ctx.fillStyle = AERO_CAPSULE_BRASS;
+  ctx.fillRect(left, top, Math.round(6 * zoom), Math.round(4 * zoom));
+  ctx.fillStyle = AERO_CAPSULE_GLASS;
+  ctx.fillRect(
+    left + Math.round(zoom),
+    top + Math.round(zoom),
+    Math.round(4 * zoom),
+    Math.round(2 * zoom),
+  );
+}
+
 /** The whiteboard's and the clock's text. */
 function drawWall(
   ctx: CanvasRenderingContext2D,
@@ -236,6 +261,19 @@ export function drawAeroOverlay(
   drawEffects(ctx, os.aero.fx, offsetX, offsetY, zoom);
   drawWall(ctx, os, offsetX, offsetY, zoom);
   drawFloorSign(ctx, os, offsetX, offsetY, zoom);
+
+  // Tower handoffs: the capsule a lead carries, and those lying on the receivers' desks.
+  for (const c of os.aero.carriedCapsules()) drawCapsule(ctx, c.x, c.y, offsetX, offsetY, zoom);
+  for (const d of os.aero.deskCapsules()) {
+    drawCapsule(
+      ctx,
+      d.col * TILE_SIZE + TILE_SIZE / 2,
+      d.row * TILE_SIZE + TILE_SIZE / 2,
+      offsetX,
+      offsetY,
+      zoom,
+    );
+  }
 
   // Badges: the live subagents of each lead, also when it isn't hovered.
   for (const [parentId, count] of os.aero.badgeCounts()) {

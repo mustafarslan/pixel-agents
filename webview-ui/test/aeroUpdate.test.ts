@@ -194,3 +194,50 @@ test('badge text and clipping', () => {
   assert.equal(clip('abcdef', 4), 'abc…');
   assert.equal(clip('abcdef', 0), '…');
 });
+
+// ── Tower handoffs ───────────────────────────────────────────────
+
+const RA = 'aaaaaaaaaaaa';
+const RB = 'bbbbbbbbbbbb';
+const withHandoffs = (handoffs: unknown) => ({ ...good(), handoffs });
+
+test('handoffs: seq and two rooms only; null or absent is none; the list comes back as it was', () => {
+  const list = [
+    { seq: 0, fromRoom: RA, toRoom: RB },
+    { seq: 2_147_483_647, fromRoom: null, toRoom: RB },
+    { seq: 9, fromRoom: RA, toRoom: null },
+  ];
+  assert.deepEqual(parseAeroUpdate(withHandoffs(list)), withHandoffs(list));
+  assert.deepEqual(parseAeroUpdate(withHandoffs([])), withHandoffs([]));
+  assert.deepEqual(parseAeroUpdate(withHandoffs(null)), good());
+  assert.deepEqual(parseAeroUpdate(good()), good());
+});
+
+test('handoffs: a role name, a task id, a non-hex room, a bad seq or a 17th item rejects the update whole', () => {
+  const item = { seq: 1, fromRoom: RA, toRoom: RB };
+  const bad: unknown[] = [
+    [{ ...item, role: 'builder' }],
+    [{ ...item, task: 'T-12' }],
+    [{ ...item, gated: false }],
+    [{ seq: 1, fromRoom: RA }],
+    [{ ...item, fromRoom: 'builder' }],
+    [{ ...item, toRoom: 'ABCDEFABCDEF' }],
+    [{ ...item, toRoom: 'aaaaaaaaaaaaa' }],
+    [{ ...item, toRoom: 7 }],
+    [{ ...item, seq: -1 }],
+    [{ ...item, seq: 2_147_483_648 }],
+    [{ ...item, seq: 1.5 }],
+    [{ ...item, seq: '1' }],
+    [{ seq: 1, fromRoom: null, toRoom: null }],
+    [{ seq: 1, fromRoom: RA, toRoom: RA }],
+    [item, item],
+    Array.from({ length: 17 }, (_, i) => ({ seq: i, fromRoom: RA, toRoom: RB })),
+    'x',
+    {},
+    [null],
+    [[]],
+  ];
+  for (const handoffs of bad) assert.equal(parseAeroUpdate(withHandoffs(handoffs)), null);
+  const sixteen = Array.from({ length: 16 }, (_, i) => ({ seq: i, fromRoom: RA, toRoom: RB }));
+  assert.deepEqual(parseAeroUpdate(withHandoffs(sixteen)), withHandoffs(sixteen));
+});

@@ -9,8 +9,8 @@
 
 export type BreakKind = 'cooler' | 'coffee' | 'vending' | 'smoke';
 
-/** What a route is for: the Lounge, a break, lunch in the café, or posting a capsule at the tube station. */
-export type RouteKind = 'lounge' | BreakKind | 'lunch' | 'tube';
+/** What a route is for: the Lounge, a break, lunch in the café, posting a capsule at the tube station, or carrying a handoff. */
+export type RouteKind = 'lounge' | BreakKind | 'lunch' | 'tube' | 'handoff';
 
 export const BREAK_KINDS: readonly BreakKind[] = ['cooler', 'coffee', 'vending', 'smoke'];
 

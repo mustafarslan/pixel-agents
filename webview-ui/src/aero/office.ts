@@ -29,6 +29,16 @@ import {
 } from './activity.js';
 import { Effects, type FxKind } from './effects.js';
 import {
+  deskTile,
+  HandoffBook,
+  type HandoffParty,
+  type HandoffStage,
+  MAX_ACTIVE_HANDOFFS,
+  planHandoff,
+  podOriginOf,
+  type QueuedHandoff,
+} from './handoff.js';
+import {
   clockPlateRect,
   findLounge,
   type Lounge,
@@ -90,6 +100,7 @@ import {
 } from './stations.js';
 import {
   type AeroFloor,
+  type AeroHandoff,
   type AeroPods,
   type AeroUpdate,
   agentTypeFromStatus,
@@ -309,6 +320,17 @@ export interface Route {
   need?: string;
   slot?: number;
   posted?: boolean;
+  /** A handoff route: the handoff, its stops, which one it is at, and whether the capsule is in hand. */
+  hand?: HandoffRun;
+}
+
+/** A lead carrying a tower handoff (`handoff.ts` plans the stops). `done` once it was delivered or posted: a dropped walk is not queued again. */
+interface HandoffRun {
+  item: QueuedHandoff;
+  stages: HandoffStage[];
+  stage: number;
+  carrying: boolean;
+  done: boolean;
 }
 
 const kindOf = (route: Route): RouteKind => route.kind ?? 'lounge';
@@ -488,6 +510,11 @@ export class AeroOffice {
   /** How many capsules have been posted, and the last ones (who, and the tile they stood on). */
   private tubesPosted = 0;
   private tubePosts: Array<{ id: number; col: number; row: number }> = [];
+  /** The tower handoffs: the queue, the capsules on desks and the deliveries (see `handoff.ts`). */
+  handoffs = new HandoffBook();
+  private handoffSeen: AeroUpdate | null = null;
+  /** The tick clock when each lead last found a handoff of its own it could not walk to. */
+  private handoffTried = new Map<number, number>();
   people: Person[] = [];
   chats = new Map<number, Chat>();
   /** The effects (pixelfx) Aero starts: a burst on the whiteboard, a countdown on the clock, a poof at a person. */
@@ -963,6 +990,8 @@ export class AeroOffice {
 
     // A lead the owner is needed by walks to the tube station first; a question leaves the lead active, so this is before that branch.
     if (this.tubeStep(ch, dt, step)) return;
+    // A lead with a tower handoff to carry walks it (a walking lead is not active as far as the stock step is concerned).
+    if (this.handoffStep(ch, dt, step)) return;
 
     if (ch.isActive) {
       this.leave(ch);
@@ -1050,6 +1079,8 @@ export class AeroOffice {
     const route = this.routes.get(id);
     // A trip that never posted is not a trip the need was answered by: the lead may be sent again.
     if (route && kindOf(route) === 'tube' && route.posted !== true) this.tubeLatch.delete(id);
+    // A handoff that was not delivered or posted waits again (a few times at most).
+    if (route?.hand && !route.hand.done) this.handoffs.requeue(route.hand.item);
     if (this.routes.delete(id)) this.occupancy++;
     this.chats.delete(id);
   }
@@ -1267,6 +1298,7 @@ export class AeroOffice {
       route.fx = null;
     }
     if (kindOf(route) === 'tube' && route.slot === 0) this.post(ch, route);
+    if (route.hand) this.handoffArrived(ch, route, route.hand);
   }
 
   // ── The tube station ─────────────────────────────────────────────
@@ -1426,6 +1458,236 @@ export class AeroOffice {
       route.target.row * TILE_SIZE + TILE_SIZE / 2 - FX_TUBE_RISE,
     );
     this.tubeSound();
+  }
+
+  // ── Tower handoffs ───────────────────────────────────────────────
+
+  /** The lead of a room on the floor on show (the lowest id when there are two), or null. */
+  private leadOf(room: string | null): Character | null {
+    if (room === null) return null;
+    let found: Character | null = null;
+    for (const c of this.os.characters.values()) {
+      if (c.isSubagent || c.leadAgentId !== undefined || c.directoryName !== room) continue;
+      if (this.offFloor.has(c.id) || c.matrixEffect === 'despawn' || !c.seatId) continue;
+      if (found === null || c.id < found.id) found = c;
+    }
+    return found;
+  }
+
+  private partyOf(lead: Character | null): HandoffParty | null {
+    const seat = lead?.seatId ? this.os.seats.get(lead.seatId) : undefined;
+    if (!lead || !seat) return null;
+    const { cols, rows, areaTiles } = this.os.layout;
+    return {
+      home: { col: seat.seatCol, row: seat.seatRow },
+      seatUid: lead.seatId ?? null,
+      pod: podOriginOf(areaTiles, cols, rows, this.os.seatZone(lead.seatId!)),
+    };
+  }
+
+  /** The tiles of the capsules on desks that are drawn: a receiver in a pod on the floor on show. */
+  deskCapsules(): Array<{ seq: number; col: number; row: number }> {
+    const out: Array<{ seq: number; col: number; row: number }> = [];
+    for (const [seq, room] of this.handoffs.desk) {
+      const pod = this.partyOf(this.leadOf(room))?.pod;
+      if (pod) out.push({ seq, ...deskTile(pod) });
+    }
+    return out;
+  }
+
+  /** The leads carrying a capsule now, and where it is in world pixels (at the waist). */
+  carriedCapsules(): Array<{ x: number; y: number }> {
+    const out: Array<{ x: number; y: number }> = [];
+    for (const [id, route] of this.routes) {
+      const ch = this.os.characters.get(id);
+      if (route.hand?.carrying && ch && !this.hides(ch)) out.push({ x: ch.x, y: ch.y - 8 });
+    }
+    return out;
+  }
+
+  private activeHandoffs(): number {
+    let n = 0;
+    for (const route of this.routes.values()) if (route.hand) n++;
+    return n;
+  }
+
+  /** A new update: its handoffs are queued (once per floor and `seq`), and the first list of a floor only places capsules. */
+  private watchHandoffs(update: AeroUpdate | null): void {
+    const latest = getAeroUpdate();
+    if (latest === this.handoffSeen) return;
+    this.handoffSeen = latest;
+    const { reset, overflow } = this.handoffs.ingest(
+      update?.floor?.id ?? '',
+      update?.handoffs ?? [],
+    );
+    if (reset) {
+      for (const [id, route] of [...this.routes]) {
+        if (!route.hand) continue;
+        route.hand.done = true;
+        const ch = this.os.characters.get(id);
+        if (ch) this.leave(ch);
+        else this.dropRoute(id);
+      }
+    }
+    for (const item of overflow) this.placeHandoff(item);
+  }
+
+  /** The queue is full: the capsule pops at the tube and is set on the receiver's desk, with no walk. */
+  private placeHandoff(item: AeroHandoff): void {
+    const front = this.book?.tube?.queue[0];
+    if (front) {
+      this.startFx(
+        'capsule',
+        front.col * TILE_SIZE + TILE_SIZE / 2,
+        front.row * TILE_SIZE + TILE_SIZE / 2 - FX_TUBE_RISE,
+      );
+      this.tubeSound();
+    }
+    const pod = this.partyOf(this.leadOf(item.toRoom))?.pod;
+    if (!pod) return;
+    const at = deskTile(pod);
+    this.startFx(
+      'burst',
+      at.col * TILE_SIZE + TILE_SIZE / 2,
+      at.row * TILE_SIZE + TILE_SIZE / 2 + FX_BURST_DROP,
+    );
+    this.handoffs.deliver(item, -1, at);
+  }
+
+  /**
+   * A lead's step while a handoff is its to carry. True when it handled the tick; false leaves the lead to the usual rules (nothing
+   * to carry, two are walking already, or a lead that is a teammate).
+   */
+  private handoffStep(ch: Character, dt: number, step: () => void): boolean {
+    if (ch.leadAgentId !== undefined) return false;
+    let route: Route | null = this.routes.get(ch.id) ?? null;
+    if (route && !route.hand) route = null;
+    if (!route) {
+      if (this.handoffs.queue.length === 0) return false;
+      if (this.clock - (this.handoffTried.get(ch.id) ?? -Infinity) < 1) return false;
+      if (this.activeHandoffs() >= MAX_ACTIVE_HANDOFFS) return false;
+      route = this.startHandoff(ch);
+      if (!route) return false;
+    }
+    // The stock step would turn an active walker back to its seat at every tile.
+    const was = ch.isActive;
+    ch.isActive = false;
+    if (route.arrived) {
+      this.settle(ch, route);
+      this.advanceHandoff(ch, route, dt);
+    } else {
+      step();
+      this.watchWalk(ch, route, () => this.dropRoute(ch.id));
+    }
+    ch.isActive = was;
+    return true;
+  }
+
+  /** Takes the first waiting handoff this lead carries and starts its walk; null when there is none it can walk. */
+  private startHandoff(ch: Character): Route | null {
+    const room = ch.directoryName ?? null;
+    if (room === null || ch.isSubagent) return null;
+    const taken = this.occupied(ch.id);
+    const free = (t: Tile): boolean => !taken.has(key(t.col, t.row));
+    const tube = this.book?.tube?.queue[0] ?? null;
+    for (const item of this.handoffs.queue) {
+      if (item.fromRoom !== room && item.toRoom !== room) continue;
+      const sender = this.leadOf(item.fromRoom);
+      const receiver = this.leadOf(item.toRoom);
+      const plan = planHandoff({
+        sender: this.partyOf(sender),
+        receiver: this.partyOf(receiver),
+        tube,
+        free,
+      });
+      if (!plan || (plan.walker === 'sender' ? sender : receiver)?.id !== ch.id) continue;
+      const first = plan.stages[0];
+      const here = ch.tileCol === first.tile.col && ch.tileRow === first.tile.row;
+      if (!here && this.pathTo(ch, first.tile).length === 0) {
+        // Not tried again for a second (the path may open).
+        this.handoffTried.set(ch.id, this.clock);
+        continue;
+      }
+      this.handoffs.take((q) => q === item);
+      this.leave(ch);
+      const route: Route = {
+        mode: 'rest',
+        kind: 'handoff',
+        target: { ...first.tile },
+        seatUid: null,
+        dir: first.dir,
+        timer: first.pause,
+        bubble: null,
+        arrived: false,
+        tries: 0,
+        hand: {
+          item,
+          stages: plan.stages,
+          stage: 0,
+          carrying: plan.walker === 'sender',
+          done: false,
+        },
+      };
+      this.putRoute(ch.id, route);
+      if (here) this.arrive(ch, route);
+      else this.walkTo(ch, first.tile);
+      return route;
+    }
+    return null;
+  }
+
+  /** The walker is at a stop: the capsule is set down, posted or taken out of the tube, once. */
+  private handoffArrived(ch: Character, route: Route, hand: HandoffRun): void {
+    const stage = hand.stages[hand.stage];
+    const at = { col: ch.tileCol, row: ch.tileRow };
+    const fxAt = (kind: FxKind, tile: Tile, drop: number): void => {
+      this.startFx(
+        kind,
+        tile.col * TILE_SIZE + TILE_SIZE / 2,
+        tile.row * TILE_SIZE + TILE_SIZE / 2 + drop,
+      );
+    };
+    if (stage.act === 'deliver') {
+      hand.carrying = false;
+      hand.done = true;
+      this.handoffs.deliver(hand.item, ch.id, at);
+      fxAt('capsule', at, -FX_TUBE_RISE);
+      fxAt('burst', at, FX_BURST_DROP);
+      this.tubeSound();
+    } else if (stage.act === 'post') {
+      hand.carrying = false;
+      hand.done = true;
+      this.post(ch, route);
+    } else if (stage.act === 'collect') {
+      hand.carrying = true;
+      fxAt('capsule', at, -FX_TUBE_RISE);
+      this.tubeSound();
+    }
+    route.timer = stage.pause;
+  }
+
+  /** At a stop: stands its pause, then goes on to the next stop, or is done at the last. */
+  private advanceHandoff(ch: Character, route: Route, dt: number): void {
+    const hand = route.hand!;
+    route.timer = (route.timer ?? 0) - dt;
+    if (route.timer > 0) return;
+    if (hand.stage + 1 >= hand.stages.length) {
+      hand.done = true;
+      this.dropRoute(ch.id);
+      return;
+    }
+    const next = hand.stages[++hand.stage];
+    route.target = { ...next.tile };
+    route.seatUid = next.seatUid;
+    route.dir = next.dir;
+    route.arrived = false;
+    route.tries = 0;
+    this.occupancy++;
+    if (!this.walkTo(ch, next.tile)) {
+      this.dropRoute(ch.id);
+      return;
+    }
+    if (ch.tileCol === next.tile.col && ch.tileRow === next.tile.row) this.arrive(ch, route);
   }
 
   /** Keeps an arrived lead sitting or standing, whatever the stock step would do. */
@@ -2081,6 +2343,9 @@ export class AeroOffice {
     for (const id of [...this.failed.keys()]) {
       if (!this.os.characters.has(id)) this.failed.delete(id);
     }
+    for (const id of [...this.handoffTried.keys()]) {
+      if (!this.os.characters.has(id)) this.handoffTried.delete(id);
+    }
     // A lead whose need ended may be sent again by the next one; gone leads are forgotten (not in `drive`, which returns early for a
     // lead off the floor).
     for (const id of [...this.tubeLatch.keys()]) {
@@ -2109,6 +2374,7 @@ export class AeroOffice {
     this.reconcilePeople(update);
     this.matchQueued();
     this.watchUpdate(update);
+    this.watchHandoffs(update);
     for (const person of [...this.people]) this.stepPerson(person, dt);
     this.tendHuddle();
     this.stepProton(dt, update);
@@ -3630,6 +3896,11 @@ export class AeroOffice {
         : null,
       tubeSent: this.tubesPosted,
       tubePosts: this.tubePosts.map((p) => ({ ...p })),
+      handoffsDelivered: this.handoffs.delivered,
+      handoffDeliveries: this.handoffs.deliveries.map((d) => ({ ...d })),
+      activeHandoffs: this.activeHandoffs(),
+      queuedHandoffs: this.handoffs.queue.length,
+      deskCapsules: this.deskCapsules(),
       meetingsOn: this.meetings,
       huddle: this.huddle
         ? {
@@ -3781,6 +4052,13 @@ export interface AeroSnapshot {
   tubeSent: number;
   /** The last posts: the lead and the tile it stood on (the front tile). */
   tubePosts: Array<{ id: number; col: number; row: number }>;
+  /** How many handoffs were set on a receiver's desk, the last ones (the `seq`, who carried it or -1 for a placed one, and the tile). */
+  handoffsDelivered: number;
+  handoffDeliveries: Array<{ seq: number; id: number; col: number; row: number }>;
+  /** How many leads are carrying a handoff, how many wait, and the capsules on desks (the tile each is drawn on). */
+  activeHandoffs: number;
+  queuedHandoffs: number;
+  deskCapsules: Array<{ seq: number; col: number; row: number }>;
   badges: Record<string, number>;
   /** The front desk's people: where they sit and the bubble they show. */
   npcs: Array<{

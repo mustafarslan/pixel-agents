@@ -5,7 +5,7 @@
  * types and caps. Anything else is rejected whole, and the page keeps the last update it accepted. The page draws
  * these strings with canvas `fillText` only, never as HTML.
  *
- * The exact JSON (`pods` is the open office's live pod data and `floor` the floor on show; both are optional, and `null`
+ * The exact JSON (`pods` is the open office's live pod data `floor` the floor on show and `handoffs` the tower handoffs pending; all are optional, and `null`
  * means the same as absent):
  *
  *   {
@@ -18,7 +18,8 @@
  *       "mappings": { "<directoryName>": ["Pod 1"], "<directoryName>": ["Hot desks"], ... },
  *       "labels":   { "Pod 1": { "name": "feat-auth", "dim": false }, "Pod 2": { "name": "", "dim": true }, ... }
  *     },
- *     "floor": { "id": "<12 hex>", "number": 2, "name": "web", "rooms": ["<12 hex>" | "prruns", ...] }
+ *     "floor": { "id": "<12 hex>", "number": 2, "name": "web", "rooms": ["<12 hex>" | "prruns", ...] },
+ *     "handoffs": [ { "seq": 12, "fromRoom": "<12 hex>" | null, "toRoom": "<12 hex>" | null } ]
  *   }
  *
  * - `mappings`: at most 32 keys (14 worktrees and the fixed ones); a key is a directory name (1..40 characters), its value
@@ -29,6 +30,8 @@
  * - `floor`: the one floor on show (one per repo; its bar and the other floors stay in Aero). `id` is 12 hex, `number` 1..16,
  *   `name` 1..32 characters, `rooms` at most 64 distinct directory names (12 hex, or `prruns`, which is on every floor). A
  *   character whose directory name is not in `rooms` (and its subagents and teammates) is not on this floor: hidden, with no seat.
+ * - `handoffs`: at most 16, each exactly `seq` (an integer, 0..2147483647, once in the list), `fromRoom` and `toRoom` (a worktree's
+ *   room: 12 hex, or null when that side is not on a row; not both null, not the same). Nothing else crosses: no role, task or text.
  * - `agents`: a project agent has the `floor` (the repo's floor id) it is staff of, or, with no floor (Rooms style, no repo),
  *   the `room` of its worktree; never both. The owner's have neither: one shared set, on the floor on show unless its roster
  *   has the type. At most 16 a floor, 16 of the owner's, 272 in all; with no `floor` in the update, 16 in all (rooms', then the owner's); a slug once per floor, room or owner.
@@ -55,6 +58,9 @@ export const MAX_FLOOR_NAME_CHARS = 32;
 export const MAX_FLOOR_ROOMS = 64;
 /** The shared stub folder of the PR runs, which are on every floor. */
 export const PR_RUNS_ROOM = 'prruns';
+/** Tower handoffs pending: at most 16, and `seq` is tower's event counter (an Int32 at most). */
+export const MAX_HANDOFFS = 16;
+export const MAX_HANDOFF_SEQ = 2_147_483_647;
 
 export interface AeroAgent {
   /** What the character is labelled with. */
@@ -103,6 +109,12 @@ export interface AeroFloor {
   rooms: string[];
 }
 
+export interface AeroHandoff {
+  seq: number;
+  fromRoom: string | null;
+  toRoom: string | null;
+}
+
 export interface AeroUpdate {
   /** True from 12:00 to 13:00 by the Mac's clock (Aero computes it: the page has no clock of its own). */
   lunch: boolean;
@@ -115,10 +127,12 @@ export interface AeroUpdate {
   pods?: AeroPods;
   /** The floor on show. Absent when the update carries none: everyone is on the floor. */
   floor?: AeroFloor;
+  /** The tower handoffs pending. Absent when the update carries none. */
+  handoffs?: AeroHandoff[];
 }
 
 const KEYS = ['agents', 'inbox', 'lounge', 'lunch', 'meeting'];
-const OPTIONAL_KEYS = ['floor', 'pods'];
+const OPTIONAL_KEYS = ['floor', 'handoffs', 'pods'];
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const ROOM_RE = /^[0-9a-f]{12}$/;
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -222,6 +236,28 @@ function parseFloor(raw: unknown): AeroFloor | null {
   return { id, number, name: text, rooms: [...rooms] as string[] };
 }
 
+/** The handoffs, or null when they aren't exactly the shape above. */
+function parseHandoffs(raw: unknown): AeroHandoff[] | null {
+  if (!Array.isArray(raw) || raw.length > MAX_HANDOFFS) return null;
+  const seen = new Set<number>();
+  const out: AeroHandoff[] = [];
+  for (const item of raw) {
+    if (!isPlainObject(item) || !hasKeys(item, ['fromRoom', 'seq', 'toRoom'])) return null;
+    const { seq, fromRoom, toRoom } = item;
+    if (typeof seq !== 'number' || !Number.isInteger(seq) || seq < 0 || seq > MAX_HANDOFF_SEQ) {
+      return null;
+    }
+    if (seen.has(seq)) return null;
+    seen.add(seq);
+    for (const room of [fromRoom, toRoom]) {
+      if (room !== null && (typeof room !== 'string' || !ROOM_RE.test(room))) return null;
+    }
+    if ((fromRoom === null && toRoom === null) || fromRoom === toRoom) return null;
+    out.push({ seq, fromRoom: fromRoom as string | null, toRoom: toRoom as string | null });
+  }
+  return out;
+}
+
 /** The update, or null when it isn't exactly the shape above. */
 export function parseAeroUpdate(raw: unknown): AeroUpdate | null {
   if (!isPlainObject(raw)) return null;
@@ -236,6 +272,11 @@ export function parseAeroUpdate(raw: unknown): AeroUpdate | null {
   if ('floor' in raw && raw.floor !== null) {
     floor = parseFloor(raw.floor);
     if (floor === null) return null;
+  }
+  let handoffs: AeroHandoff[] | null = null;
+  if ('handoffs' in raw && raw.handoffs !== null) {
+    handoffs = parseHandoffs(raw.handoffs);
+    if (handoffs === null) return null;
   }
   if (typeof lunch !== 'boolean' || typeof lounge !== 'boolean') return null;
   if (typeof inbox !== 'number' || !Number.isInteger(inbox) || inbox < 0 || inbox > MAX_INBOX) {
@@ -303,6 +344,7 @@ export function parseAeroUpdate(raw: unknown): AeroUpdate | null {
   };
   if (pods !== null) update.pods = pods;
   if (floor !== null) update.floor = floor;
+  if (handoffs !== null) update.handoffs = handoffs;
   return update;
 }
 
