@@ -19,6 +19,7 @@ import {
   MAX_ACTIVE_HANDOFFS,
   MAX_QUEUED_HANDOFFS,
   planHandoff,
+  podOriginMap,
   podOriginOf,
   receiverStop,
 } from '../src/aero/handoff.js';
@@ -483,7 +484,7 @@ test('the sender is not in the office: the tube pops a capsule and the receiver 
   assert.equal(os.aero.carriedCapsules().length, 1, 'carrying it out of the tube');
   waitFor(os, () => delivered(os) === 1, 60, 'delivered');
   assert.deepEqual(snap(os).handoffDeliveries, [{ seq: 4, id: 1, ...homeOf(os, 1) }]);
-  assert.equal(c.sounds.n, 2);
+  assert.equal(c.sounds.n, 1, 'the pop at the tube is the one sound; the desk adds none');
   assert.deepEqual(snap(os).deskCapsules, [{ seq: 4, col: 5, row: 2 }]);
   assert.equal(snap(os).tubeSent, 0, 'nothing was posted');
   waitFor(os, () => atDesk(os, 1) && !walking(os, 1), 60, 'at its desk');
@@ -570,6 +571,8 @@ test('a lead sent to the tube for a permission request puts its handoff back in 
   os.setAgentTool(1, 'Bash');
   os.showPermissionBubble(1);
   waitFor(os, () => snap(os).tubeSent === 1, 60, 'the permission trip');
+  // A lead the owner is still needed by holds at its desk and carries nothing; once the request is answered it does.
+  os.clearPermissionBubble(1);
   waitFor(os, () => delivered(os) === 1, 120, 'the handoff, after');
   assert.equal(delivered(os), 1);
   assert.equal(snap(os).handoffDeliveries[0].seq, 5);
@@ -586,4 +589,239 @@ test('a floor switch drops the walks and puts the capsules on the desks', () => 
   assert.equal(os.aero.carriedCapsules().length, 0);
   assert.equal(delivered(os), 0);
   assert.equal(snap(os).queuedHandoffs, 0);
+});
+
+// ── The fix round ─────────────────────────────────────────────────
+
+test('an update with no handoffs key is "not read yet": nothing is ingested, capsules stay and the reset waits for the first list', () => {
+  const c = office(2);
+  const { os } = c;
+  send([item(5, RA, RB)]);
+  waitFor(os, () => delivered(os) === 1, 60, 'delivered');
+  assert.equal(snap(os).deskCapsules.length, 1);
+  // The key is absent: the capsule stays, nothing is queued.
+  assert.ok(setAeroUpdate(upd(undefined, FLOOR)));
+  run(os, 0.3);
+  assert.equal(snap(os).deskCapsules.length, 1, 'absent is not an empty list');
+  // A new floor with the key absent does not use up the floor's first list: the list that follows only places.
+  assert.ok(setAeroUpdate(upd(undefined, OTHER_FLOOR)));
+  run(os, 0.3);
+  send([item(7, RA, RB)], OTHER_FLOOR);
+  run(os, 10);
+  assert.equal(walking(os, 1), false, 'the first list that is read places, it does not walk');
+  assert.equal(delivered(os), 1);
+  assert.deepEqual(
+    snap(os).deskCapsules.map((d) => d.seq),
+    [7],
+  );
+});
+
+test('the book: a seq that left the list and comes back is placed on its desk with no walk, one that was null and resolves gets its capsule', () => {
+  const book = new HandoffBook();
+  book.ingest(FLOOR, []);
+  book.ingest(FLOOR, [item(5, RA, RB), item(6, RA, null)]);
+  assert.equal(book.queue.length, 2);
+  book.take(() => true); // 5 is on its way
+  book.take(() => true); // 6 too
+  book.deliver(item(5, RA, RB), 1, { col: 1, row: 1 });
+  assert.deepEqual([...book.desk], [[5, RB]]);
+  book.ingest(FLOOR, []);
+  assert.deepEqual([...book.desk], []);
+  const back = book.ingest(FLOOR, [item(5, RA, RB)]);
+  assert.deepEqual(back, { reset: false, overflow: [] });
+  assert.equal(book.queue.length, 0, 'not walked again');
+  assert.deepEqual([...book.desk], [[5, RB]], 'but its capsule is back on the desk');
+  // A seq whose receiver was null and resolves later.
+  book.ingest(FLOOR, [item(5, RA, RB), item(6, RA, RC)]);
+  assert.deepEqual(
+    [...book.desk],
+    [
+      [5, RB],
+      [6, RC],
+    ],
+  );
+  // A seq that is still on its way (not delivered) has no capsule yet.
+  const b2 = new HandoffBook();
+  b2.ingest(FLOOR, []);
+  b2.ingest(FLOOR, [item(8, RA, RB)]);
+  b2.take(() => true);
+  b2.ingest(FLOOR, [item(8, RA, RB)]);
+  assert.deepEqual([...b2.desk], [], 'on its way: no capsule before it arrives');
+});
+
+test('the book: evicting the oldest seen seqs never evicts one that is still listed', () => {
+  const book = new HandoffBook();
+  book.ingest(FLOOR, [item(1, RA, RB)]);
+  for (let i = 0; i < 300; i++) book.ingest(FLOOR, [item(1, RA, RB), item(1000 + i, RA, RB)]);
+  assert.deepEqual(
+    book.queue.map((q) => q.seq),
+    [1299],
+    'seq 1 was never queued as if it were new',
+  );
+});
+
+test('the book: an item nobody can carry now waits outside the eight, and comes in when somebody can', () => {
+  const book = new HandoffBook();
+  book.ingest(FLOOR, []);
+  const nobody = () => false;
+  const list = Array.from({ length: 9 }, (_, i) => item(i + 1, RA, RB));
+  const r = book.ingest(FLOOR, list, nobody);
+  assert.deepEqual(r.overflow, []);
+  assert.equal(book.queue.length, 0);
+  assert.equal(book.waiting.length, 9);
+  // A plannable one still has a slot.
+  const next = book.ingest(FLOOR, [...list, item(10, RB, RA)], (h) => h.seq === 10);
+  assert.deepEqual(next.overflow, []);
+  assert.deepEqual(
+    book.queue.map((q) => q.seq),
+    [10],
+  );
+  // Somebody can carry them now: they come in, eight at most.
+  book.retryWaiting(() => true);
+  assert.equal(book.queue.length, MAX_QUEUED_HANDOFFS);
+  assert.equal(book.waiting.length, 2);
+  // One that leaves the list leaves the waiting too.
+  book.ingest(FLOOR, [item(9, RA, RB)]);
+  assert.deepEqual(
+    [...book.queue, ...book.waiting].map((q) => q.seq),
+    [9],
+  );
+});
+
+test('eight handoffs nobody can carry do not hold the queue: when the receiver arrives all nine are walked', () => {
+  const c = office(1, { noTube: true });
+  const { os } = c;
+  send(Array.from({ length: 9 }, (_, i) => item(i + 1, RA, RB)));
+  run(os, 5);
+  assert.equal(delivered(os), 0);
+  assert.equal(snap(os).queuedHandoffs, 9, 'all nine wait');
+  os.addAgent(2, 0, 0, LEAD_SEATS[1], true, RB);
+  run(os, MATRIX_EFFECT_DURATION + 0.5);
+  os.setAgentActive(2, true);
+  waitFor(os, () => delivered(os) === 9, 400, 'all nine delivered');
+  assert.ok(
+    snap(os).handoffDeliveries.every((d) => d.id === 1),
+    'every one was walked by the sender',
+  );
+});
+
+test('with the queue full a handoff to a receiver with no pod still gets its desk entry, and a tube post counts', () => {
+  const c = office(1);
+  const { os } = c;
+  send(Array.from({ length: 9 }, (_, i) => item(i + 1, RA, RB)));
+  run(os, 0.2);
+  assert.equal(os.aero.handoffs.desk.get(9), RB, 'the capsule waits for the receiver');
+  assert.equal(snap(os).tubeSent, 1, 'the one that went up the tube is a post');
+  assert.deepEqual(snap(os).deskCapsules, [], 'nothing is drawn: the receiver has no pod here');
+});
+
+test('the receiver pods are found once per layout, not by scanning the tiles at every call', () => {
+  const c = office(2);
+  const { os } = c;
+  send([item(5, RA, RB)]);
+  waitFor(os, () => delivered(os) === 1, 60, 'delivered');
+  const tiles = os.layout.areaTiles!;
+  let reads = 0;
+  os.layout.areaTiles = new Proxy(tiles, {
+    get(target, prop, receiver) {
+      if (typeof prop === 'string' && /^\d+$/.test(prop)) reads++;
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+  for (let i = 0; i < 5; i++) assert.equal(snap(os).deskCapsules.length, 1);
+  // A seat's zone is one tile; a scan for the pod would read all of them (a floor is 1944 tiles here).
+  assert.ok(reads <= 20, `the tiles were read ${reads} times`);
+  assert.deepEqual(podOriginMap(tiles, COLS, ROWS).get('Pod 2'), { col: 10, row: 2 });
+});
+
+test('a lead held at its desk for the owner (a permission bubble it has been to the tube for) carries nothing', () => {
+  const c = office(2);
+  const { os } = c;
+  os.setAgentTool(1, 'Bash');
+  os.showPermissionBubble(1);
+  waitFor(os, () => snap(os).tubeSent === 1, 60, 'the permission trip');
+  waitFor(os, () => atDesk(os, 1) && !walking(os, 1), 60, 'back at its desk');
+  send([item(5, RA, RB)]);
+  run(os, 20);
+  assert.equal(walking(os, 1), false);
+  assert.equal(delivered(os), 0);
+  os.clearPermissionBubble(1);
+  waitFor(os, () => delivered(os) === 1, 90, 'delivered once the request is answered');
+});
+
+test('the collect route: the capsule effect and the whoosh play once at the tube, and a collected capsule is not collected twice after an interruption', () => {
+  const c = office(1);
+  const { os } = c;
+  send([item(4, RB, RA)]);
+  waitFor(os, () => c.sounds.n === 1, 60, 'the pop at the tube');
+  assert.equal(os.aero.carriedCapsules().length, 1);
+  const fx = capsules(os);
+  // Interrupted after collecting: the permission trip posts once, then the capsule goes to the desk.
+  os.setAgentTool(1, 'Bash');
+  os.showPermissionBubble(1);
+  waitFor(os, () => snap(os).tubeSent === 1, 60, 'the permission trip');
+  os.clearPermissionBubble(1);
+  waitFor(os, () => delivered(os) === 1, 120, 'delivered');
+  assert.equal(c.sounds.n, 2, 'one pop and one permission post, no second collect');
+  assert.equal(capsules(os), fx + 1, 'the capsule effect: the permission post only');
+  assert.deepEqual(snap(os).handoffDeliveries, [{ seq: 4, id: 1, ...homeOf(os, 1) }]);
+});
+
+test('a seq that leaves the list mid-walk cancels the walk: nothing is delivered and the walker goes home', () => {
+  const c = office(2);
+  const { os } = c;
+  send([item(5, RA, RB)]);
+  waitFor(os, () => walking(os, 1) && !same(tileOf(os, 1), homeOf(os, 1)), 5, 'on its way');
+  send([]);
+  waitFor(os, () => atDesk(os, 1) && !walking(os, 1), 60, 'home');
+  run(os, 5);
+  assert.equal(delivered(os), 0);
+  assert.equal(c.sounds.n, 0);
+  assert.equal(os.aero.carriedCapsules().length, 0);
+  assert.deepEqual(snap(os).deskCapsules, []);
+});
+
+test('the plan is busy rather than stacking on a tube front or a pod tile somebody holds', () => {
+  const party = (col: number, pod: boolean) => ({
+    home: { col, row: 4 },
+    seatUid: `s${col}`,
+    pod: pod ? { col: col - 3, row: 2 } : null,
+  });
+  const tube = { col: 20, row: 10 };
+  const a = party(4, true);
+  const b = party(13, true);
+  const not =
+    (...tiles: Array<{ col: number; row: number }>) =>
+    (t: { col: number; row: number }) =>
+      !tiles.some((x) => x.col === t.col && x.row === t.row);
+  assert.equal(planHandoff({ sender: a, receiver: null, tube, free: not(tube) })?.busy, true);
+  assert.equal(planHandoff({ sender: null, receiver: b, tube, free: not(tube) })?.busy, true);
+  assert.equal(
+    planHandoff({
+      sender: a,
+      receiver: b,
+      tube,
+      free: not({ col: 15, row: 4 }, { col: 11, row: 4 }, { col: 14, row: 5 }),
+    })?.busy,
+    true,
+    'no bench and no aisle tile free',
+  );
+  assert.equal(
+    receiverStop(
+      { col: 10, row: 2 },
+      not({ col: 15, row: 4 }, { col: 11, row: 4 }, { col: 14, row: 5 }),
+    ),
+    null,
+  );
+  assert.equal(
+    planHandoff({ sender: a, receiver: b, tube, free: not(tube) })?.busy,
+    false,
+    'a doorbell needs no tube',
+  );
+  // A collected capsule is not collected again: the receiver only takes it to its desk.
+  const again = planHandoff({ sender: null, receiver: b, tube, free: () => true, collected: true });
+  assert.deepEqual(
+    again?.stages.map((s) => s.act),
+    ['deliver'],
+  );
 });

@@ -35,7 +35,7 @@ import {
   type HandoffStage,
   MAX_ACTIVE_HANDOFFS,
   planHandoff,
-  podOriginOf,
+  podOriginMap,
   type QueuedHandoff,
 } from './handoff.js';
 import {
@@ -331,6 +331,8 @@ interface HandoffRun {
   stage: number;
   carrying: boolean;
   done: boolean;
+  /** The capsule was taken out of the tube (the effect and the whoosh played there; not again at the desk). */
+  collected: boolean;
 }
 
 const kindOf = (route: Route): RouteKind => route.kind ?? 'lounge';
@@ -515,6 +517,10 @@ export class AeroOffice {
   private handoffSeen: AeroUpdate | null = null;
   /** The tick clock when each lead last found a handoff of its own it could not walk to. */
   private handoffTried = new Map<number, number>();
+  /** The top-left tile of each pod's label, found once per layout (`refreshProton`). */
+  private podAt = new Map<string, Tile>();
+  /** The tick clock when the waiting handoffs were last looked at again. */
+  private waitingAt = -Infinity;
   people: Person[] = [];
   chats = new Map<number, Chat>();
   /** The effects (pixelfx) Aero starts: a burst on the whiteboard, a countdown on the clock, a poof at a person. */
@@ -687,6 +693,7 @@ export class AeroOffice {
         return { col: f.col, row: f.row, w: entry?.footprintW ?? 1, h: entry?.footprintH ?? 2 };
       });
     const { cols, rows, areaTiles } = os.layout;
+    this.podAt = podOriginMap(areaTiles, cols, rows);
     const area = protonArea({
       cols,
       rows,
@@ -990,8 +997,10 @@ export class AeroOffice {
 
     // A lead the owner is needed by walks to the tube station first; a question leaves the lead active, so this is before that branch.
     if (this.tubeStep(ch, dt, step)) return;
-    // A lead with a tower handoff to carry walks it (a walking lead is not active as far as the stock step is concerned).
-    if (this.handoffStep(ch, dt, step)) return;
+    // A lead with a tower handoff to carry walks it (a walking lead is not active as far as the stock step is concerned), unless the
+    // owner is needed by it: that lead is held at its desk below, and carries nothing.
+    const held = ch.bubbleType === 'permission' || this.tubeHeld(ch);
+    if (!held && this.handoffStep(ch, dt, step)) return;
 
     if (ch.isActive) {
       this.leave(ch);
@@ -1001,7 +1010,7 @@ export class AeroOffice {
     // Only a permission bubble holds an idle lead at its desk (and one that has been to the tube for its need). A question
     // (AskUserQuestion) is an active tool, so the lead is active and stays anyway; and `idle_prompt` reaches the page as a
     // finished turn with `awaitingInput` for every idle session, so that flag says nothing about the owner being needed.
-    if (ch.bubbleType === 'permission' || this.tubeHeld(ch)) {
+    if (held) {
       this.leave(ch);
       if (ch.state === CharacterState.TYPE) {
         // At its desk, waiting: sit still.
@@ -1080,7 +1089,8 @@ export class AeroOffice {
     // A trip that never posted is not a trip the need was answered by: the lead may be sent again.
     if (route && kindOf(route) === 'tube' && route.posted !== true) this.tubeLatch.delete(id);
     // A handoff that was not delivered or posted waits again (a few times at most).
-    if (route?.hand && !route.hand.done) this.handoffs.requeue(route.hand.item);
+    if (route?.hand && !route.hand.done)
+      this.handoffs.requeue({ ...route.hand.item, collected: route.hand.collected });
     if (this.routes.delete(id)) this.occupancy++;
     this.chats.delete(id);
   }
@@ -1477,11 +1487,10 @@ export class AeroOffice {
   private partyOf(lead: Character | null): HandoffParty | null {
     const seat = lead?.seatId ? this.os.seats.get(lead.seatId) : undefined;
     if (!lead || !seat) return null;
-    const { cols, rows, areaTiles } = this.os.layout;
     return {
       home: { col: seat.seatCol, row: seat.seatRow },
       seatUid: lead.seatId ?? null,
-      pod: podOriginOf(areaTiles, cols, rows, this.os.seatZone(lead.seatId!)),
+      pod: this.podAt.get(this.os.seatZone(lead.seatId!) ?? '') ?? null,
     };
   }
 
@@ -1511,30 +1520,58 @@ export class AeroOffice {
     return n;
   }
 
-  /** A new update: its handoffs are queued (once per floor and `seq`), and the first list of a floor only places capsules. */
+  /** Whether somebody could carry the handoff now (a held tile does not count: that is only a wait). */
+  private plannable(item: AeroHandoff): boolean {
+    return (
+      planHandoff({
+        sender: this.partyOf(this.leadOf(item.fromRoom)),
+        receiver: this.partyOf(this.leadOf(item.toRoom)),
+        tube: this.book?.tube?.queue[0] ?? null,
+        free: () => true,
+      }) !== null
+    );
+  }
+
+  /** A walk is over for good: no delivery, no requeue; the lead goes back to the usual rules (home). */
+  private cancelHandoff(id: number, route: Route): void {
+    if (route.hand) route.hand.done = true;
+    const ch = this.os.characters.get(id);
+    if (ch) this.leave(ch);
+    else this.dropRoute(id);
+  }
+
+  /**
+   * A new update: its handoffs are queued (once per floor and `seq`), and the first list of a floor only places capsules. An update
+   * with no `handoffs` key says the board was not read yet: it is not a list, and uses up nothing. A walk whose `seq` left the list
+   * is cancelled. Handoffs that waited for a carrier are looked at again, once a second.
+   */
   private watchHandoffs(update: AeroUpdate | null): void {
     const latest = getAeroUpdate();
-    if (latest === this.handoffSeen) return;
-    this.handoffSeen = latest;
-    const { reset, overflow } = this.handoffs.ingest(
-      update?.floor?.id ?? '',
-      update?.handoffs ?? [],
-    );
-    if (reset) {
-      for (const [id, route] of [...this.routes]) {
-        if (!route.hand) continue;
-        route.hand.done = true;
-        const ch = this.os.characters.get(id);
-        if (ch) this.leave(ch);
-        else this.dropRoute(id);
+    if (latest !== this.handoffSeen) {
+      this.handoffSeen = latest;
+      if (!update || update.handoffs !== undefined) {
+        const { reset, overflow } = this.handoffs.ingest(
+          update?.floor?.id ?? '',
+          update?.handoffs ?? [],
+          (h) => this.plannable(h),
+        );
+        for (const [id, route] of [...this.routes]) {
+          if (route.hand && (reset || !this.handoffs.isListed(route.hand.item.seq)))
+            this.cancelHandoff(id, route);
+        }
+        for (const item of overflow) this.placeHandoff(item);
       }
     }
-    for (const item of overflow) this.placeHandoff(item);
+    if (this.handoffs.waiting.length > 0 && this.clock - this.waitingAt >= 1) {
+      this.waitingAt = this.clock;
+      this.handoffs.retryWaiting((h) => this.plannable(h));
+    }
   }
 
   /** The queue is full: the capsule pops at the tube and is set on the receiver's desk, with no walk. */
   private placeHandoff(item: AeroHandoff): void {
     const front = this.book?.tube?.queue[0];
+    const pod = this.partyOf(this.leadOf(item.toRoom))?.pod;
     if (front) {
       this.startFx(
         'capsule',
@@ -1542,9 +1579,13 @@ export class AeroOffice {
         front.row * TILE_SIZE + TILE_SIZE / 2 - FX_TUBE_RISE,
       );
       this.tubeSound();
+      // Nobody takes it to a desk here: it went up the tube, which is a post.
+      if (!pod) this.tubesPosted++;
     }
-    const pod = this.partyOf(this.leadOf(item.toRoom))?.pod;
-    if (!pod) return;
+    if (!pod) {
+      this.handoffs.place(item);
+      return;
+    }
     const at = deskTile(pod);
     this.startFx(
       'burst',
@@ -1583,14 +1624,20 @@ export class AeroOffice {
     return true;
   }
 
-  /** Takes the first waiting handoff this lead carries and starts its walk; null when there is none it can walk. */
+  /**
+   * Takes the first waiting handoff this lead carries and starts its walk; null when there is none it can walk. A handoff nobody can
+   * carry is parked outside the queue; one whose tile is held waits where it is.
+   */
   private startHandoff(ch: Character): Route | null {
     const room = ch.directoryName ?? null;
     if (room === null || ch.isSubagent) return null;
-    const taken = this.occupied(ch.id);
-    const free = (t: Tile): boolean => !taken.has(key(t.col, t.row));
+    let taken: Set<string> | null = null;
+    const free = (t: Tile): boolean => {
+      taken ??= this.occupied(ch.id);
+      return !taken.has(key(t.col, t.row));
+    };
     const tube = this.book?.tube?.queue[0] ?? null;
-    for (const item of this.handoffs.queue) {
+    for (const item of [...this.handoffs.queue]) {
       if (item.fromRoom !== room && item.toRoom !== room) continue;
       const sender = this.leadOf(item.fromRoom);
       const receiver = this.leadOf(item.toRoom);
@@ -1599,8 +1646,18 @@ export class AeroOffice {
         receiver: this.partyOf(receiver),
         tube,
         free,
+        collected: item.collected === true,
       });
-      if (!plan || (plan.walker === 'sender' ? sender : receiver)?.id !== ch.id) continue;
+      if (plan === null) {
+        this.handoffs.park(item);
+        continue;
+      }
+      if ((plan.walker === 'sender' ? sender : receiver)?.id !== ch.id) continue;
+      if (plan.busy) {
+        // Its tile is held: it stays queued, and is looked at again in a second.
+        this.handoffTried.set(ch.id, this.clock);
+        continue;
+      }
       const first = plan.stages[0];
       const here = ch.tileCol === first.tile.col && ch.tileRow === first.tile.row;
       if (!here && this.pathTo(ch, first.tile).length === 0) {
@@ -1610,6 +1667,7 @@ export class AeroOffice {
       }
       this.handoffs.take((q) => q === item);
       this.leave(ch);
+      const collected = item.collected === true;
       const route: Route = {
         mode: 'rest',
         kind: 'handoff',
@@ -1624,8 +1682,9 @@ export class AeroOffice {
           item,
           stages: plan.stages,
           stage: 0,
-          carrying: plan.walker === 'sender',
+          carrying: plan.walker === 'sender' || collected,
           done: false,
+          collected,
         },
       };
       this.putRoute(ch.id, route);
@@ -1651,15 +1710,20 @@ export class AeroOffice {
       hand.carrying = false;
       hand.done = true;
       this.handoffs.deliver(hand.item, ch.id, at);
-      fxAt('capsule', at, -FX_TUBE_RISE);
+      // A capsule taken out of the tube already had its effect and its whoosh there.
+      if (!hand.collected) {
+        fxAt('capsule', at, -FX_TUBE_RISE);
+        this.tubeSound();
+      }
       fxAt('burst', at, FX_BURST_DROP);
-      this.tubeSound();
     } else if (stage.act === 'post') {
       hand.carrying = false;
       hand.done = true;
+      this.handoffs.finish(hand.item.seq);
       this.post(ch, route);
     } else if (stage.act === 'collect') {
       hand.carrying = true;
+      hand.collected = true;
       fxAt('capsule', at, -FX_TUBE_RISE);
       this.tubeSound();
     }
@@ -3235,10 +3299,16 @@ export class AeroOffice {
     const signature = `${this.benchSignature(lead.seatId)}|${groups.join()}|${w.group ?? ''}`;
     if (w.noBench === signature) return false;
     const taken = this.occupied(ch.id);
+    // A seat a lead is carrying a handoff to is not lent out meanwhile.
+    const handoffStops = new Set<string>();
+    for (const route of this.routes.values()) {
+      if (route.hand) handoffStops.add(key(route.target.col, route.target.row));
+    }
     let searches = 0;
     for (const group of groups) {
       for (const st of this.candidates(group, lead)) {
         if (st.seat === null && taken.has(st.key)) continue;
+        if (handoffStops.has(key(st.col, st.row))) continue;
         const at = ch.tileCol === st.col && ch.tileRow === st.row;
         let path: Tile[] = [];
         if (!at && !snap) {
@@ -3899,7 +3969,7 @@ export class AeroOffice {
       handoffsDelivered: this.handoffs.delivered,
       handoffDeliveries: this.handoffs.deliveries.map((d) => ({ ...d })),
       activeHandoffs: this.activeHandoffs(),
-      queuedHandoffs: this.handoffs.queue.length,
+      queuedHandoffs: this.handoffs.waitingCount,
       deskCapsules: this.deskCapsules(),
       meetingsOn: this.meetings,
       huddle: this.huddle
