@@ -2395,6 +2395,11 @@ export class AeroOffice {
     return getAeroUpdate()?.pods !== undefined;
   }
 
+  /** Sub-steps a frame runs: the update's `timeScale` (the self-test's), else 1. */
+  timeScale(): number {
+    return getAeroUpdate()?.timeScale ?? 1;
+  }
+
   /** Once a tick, after every character stepped. */
   afterTick(dt: number): void {
     this.syncMappings();
@@ -3874,6 +3879,7 @@ export class AeroOffice {
     const update = getAeroUpdate();
     return {
       update,
+      clock: this.clock,
       lounge: this.lounge
         ? {
             floor: this.lounge.floor.length,
@@ -4017,6 +4023,8 @@ export class AeroOffice {
 
 export interface AeroSnapshot {
   update: AeroUpdate | null;
+  /** The tick clock in seconds (`+= dt` once a sub-step): what every schedule of the page counts on. */
+  clock: number;
   lounge: {
     floor: number;
     seats: string[];

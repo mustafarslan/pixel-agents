@@ -19,7 +19,8 @@
  *       "labels":   { "Pod 1": { "name": "feat-auth", "dim": false }, "Pod 2": { "name": "", "dim": true }, ... }
  *     },
  *     "floor": { "id": "<12 hex>", "number": 2, "name": "web", "rooms": ["<12 hex>" | "prruns", ...] },
- *     "handoffs": [ { "seq": 12, "fromRoom": "<12 hex>" | null, "toRoom": "<12 hex>" | null } ]
+ *     "handoffs": [ { "seq": 12, "fromRoom": "<12 hex>" | null, "toRoom": "<12 hex>" | null } ],
+ *     "timeScale": 8
  *   }
  *
  * - `mappings`: at most 32 keys (14 worktrees and the fixed ones); a key is a directory name (1..40 characters), its value
@@ -32,6 +33,7 @@
  *   character whose directory name is not in `rooms` (and its subagents and teammates) is not on this floor: hidden, with no seat.
  * - `handoffs`: at most 16, each exactly `seq` (an integer, 0..2147483647, once in the list), `fromRoom` and `toRoom` (a worktree's
  *   room: 12 hex, or null when that side is not on a row; not both null, not the same). Nothing else crosses: no role, task or text.
+ * - `timeScale`: an integer 1..8, the sub-steps each frame runs (the self-test's speed-up; a Release build of Aero never sends it).
  * - `agents`: a project agent has the `floor` (the repo's floor id) it is staff of, or, with no floor (Rooms style, no repo),
  *   the `room` of its worktree; never both. The owner's have neither: one shared set, on the floor on show unless its roster
  *   has the type. At most 16 a floor, 16 of the owner's, 272 in all; with no `floor` in the update, 16 in all (rooms', then the owner's); a slug once per floor, room or owner.
@@ -61,6 +63,8 @@ export const PR_RUNS_ROOM = 'prruns';
 /** Tower handoffs pending: at most 16, and `seq` is tower's event counter (an Int32 at most). */
 export const MAX_HANDOFFS = 16;
 export const MAX_HANDOFF_SEQ = 2_147_483_647;
+/** The self-test's time scale: sub-steps a frame runs. Only a Debug build of Aero sends it. */
+export const MAX_TIME_SCALE = 8;
 
 export interface AeroAgent {
   /** What the character is labelled with. */
@@ -129,10 +133,12 @@ export interface AeroUpdate {
   floor?: AeroFloor;
   /** The tower handoffs pending. Absent when the update carries none. */
   handoffs?: AeroHandoff[];
+  /** Normal-`dt` sub-steps each frame runs (1..8). Absent is 1. Sent only by a Debug build of Aero, for the self-test. */
+  timeScale?: number;
 }
 
 const KEYS = ['agents', 'inbox', 'lounge', 'lunch', 'meeting'];
-const OPTIONAL_KEYS = ['floor', 'handoffs', 'pods'];
+const OPTIONAL_KEYS = ['floor', 'handoffs', 'pods', 'timeScale'];
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const ROOM_RE = /^[0-9a-f]{12}$/;
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -278,6 +284,19 @@ export function parseAeroUpdate(raw: unknown): AeroUpdate | null {
     handoffs = parseHandoffs(raw.handoffs);
     if (handoffs === null) return null;
   }
+  let timeScale: number | null = null;
+  if ('timeScale' in raw && raw.timeScale !== null) {
+    const scale = raw.timeScale;
+    if (
+      typeof scale !== 'number' ||
+      !Number.isInteger(scale) ||
+      scale < 1 ||
+      scale > MAX_TIME_SCALE
+    ) {
+      return null;
+    }
+    timeScale = scale;
+  }
   if (typeof lunch !== 'boolean' || typeof lounge !== 'boolean') return null;
   if (typeof inbox !== 'number' || !Number.isInteger(inbox) || inbox < 0 || inbox > MAX_INBOX) {
     return null;
@@ -345,6 +364,7 @@ export function parseAeroUpdate(raw: unknown): AeroUpdate | null {
   if (pods !== null) update.pods = pods;
   if (floor !== null) update.floor = floor;
   if (handoffs !== null) update.handoffs = handoffs;
+  if (timeScale !== null) update.timeScale = timeScale;
   return update;
 }
 

@@ -1515,7 +1515,13 @@ export class OfficeState {
     ch.maxContextTokens = maxContextTokens;
   }
 
+  /** One frame: the self-test's time scale (an update's `timeScale`, 1 without it) runs that many normal-`dt` sub-steps, never one scaled `dt`. */
   update(dt: number): void {
+    const steps = this.aero.timeScale();
+    for (let i = 0; i < steps; i++) this.step(dt);
+  }
+
+  private step(dt: number): void {
     // Furniture animation cycling
     const prevFrame = Math.floor(this.furnitureAnimTimer / FURNITURE_ANIM_INTERVAL_SEC);
     this.furnitureAnimTimer += dt;

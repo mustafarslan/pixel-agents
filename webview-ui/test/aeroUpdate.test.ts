@@ -241,3 +241,20 @@ test('handoffs: a role name, a task id, a non-hex room, a bad seq or a 17th item
   const sixteen = Array.from({ length: 16 }, (_, i) => ({ seq: i, fromRoom: RA, toRoom: RB }));
   assert.deepEqual(parseAeroUpdate(withHandoffs(sixteen)), withHandoffs(sixteen));
 });
+
+// ── The self-test time scale (Debug builds only send it) ─────────
+
+test('timeScale: an integer 1..8, absent or null is the same as 1, and the update comes back as it was', () => {
+  for (const timeScale of [1, 2, 4, 8]) {
+    const update = { ...good(), timeScale };
+    assert.deepEqual(parseAeroUpdate(update), update);
+  }
+  assert.deepEqual(parseAeroUpdate(good()), good());
+  assert.deepEqual(parseAeroUpdate({ ...good(), timeScale: null }), good());
+});
+
+test('timeScale: 0, 9, a fraction, a negative, NaN, Infinity or a non-number rejects the update whole', () => {
+  for (const timeScale of [0, 9, 1.5, -1, Number.NaN, Infinity, '2', true, [], {}]) {
+    assert.equal(parseAeroUpdate({ ...good(), timeScale }), null);
+  }
+});
