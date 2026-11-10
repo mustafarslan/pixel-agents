@@ -857,6 +857,9 @@ test('the snapshot latches the tiles she stood on outside her area since the las
   const os = office(seeded(71), { timeScale: 8 });
   run(os, 20, 0.05);
   assert.deepEqual(os.aero.snapshot().protonStray, [], 'she wanders inside her area');
+  run(os, 20, 0.05);
+  const tiles = os.aero.snapshot().protonTiles;
+  assert.ok(tiles.length > 0 && tiles.every((t) => /^\d+,\d+$/.test(t)), `visited ${tiles.join(' ')}`);
   const area = (os.aero as unknown as { area: { walk: Set<string>; seats: Set<string> } }).area;
   let bad: { col: number; row: number } | null = null;
   for (let r = 0; r < ROWS && !bad; r++) {

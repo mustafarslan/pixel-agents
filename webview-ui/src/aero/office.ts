@@ -565,6 +565,8 @@ export class AeroOffice {
   /** The worst handoff walker count and the tiles Proton stood on outside her area since the last snapshot (`latchWorst`). */
   private worstWalkers = 0;
   private strayTiles = new Set<string>();
+  /** Every tile she stood on since the last snapshot, for the self-test to check against the layout itself. */
+  private protonTiles = new Set<string>();
   /** Since when (the tick clock) each subagent has held a station and worked there, by subagent id. */
   private workingSince = new Map<number, number>();
   private huddleRetryAt = 0;
@@ -2470,6 +2472,7 @@ export class AeroOffice {
     if (cat && this.area && this.protonOn(getAeroUpdate())) {
       const k = key(cat.col, cat.row);
       if (!this.area.walk.has(k) && !this.area.seats.has(k) && this.strayTiles.size < 64) this.strayTiles.add(k);
+      if (this.protonTiles.size < 256) this.protonTiles.add(k);
     }
   }
 
@@ -3901,13 +3904,16 @@ export class AeroOffice {
     const update = getAeroUpdate();
     const worstWalkers = Math.max(this.worstWalkers, this.activeHandoffs());
     const protonStray = [...this.strayTiles];
+    const protonTiles = [...this.protonTiles];
     this.worstWalkers = 0;
     this.strayTiles.clear();
+    this.protonTiles.clear();
     return {
       update,
       clock: this.clock,
       worstWalkers,
       protonStray,
+      protonTiles,
       lounge: this.lounge
         ? {
             floor: this.lounge.floor.length,
@@ -4057,6 +4063,8 @@ export interface AeroSnapshot {
   worstWalkers: number;
   /** The tiles ("col,row") Proton stood on outside her walk area and seats, on any tick since the last snapshot. */
   protonStray: string[];
+  /** Every tile ("col,row") she stood on on any tick since the last snapshot (at most 256 distinct). */
+  protonTiles: string[];
   lounge: {
     floor: number;
     seats: string[];
