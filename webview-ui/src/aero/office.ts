@@ -562,10 +562,10 @@ export class AeroOffice {
   private huddle: Huddle | null = null;
   private met = new Set<number>();
   private huddlesHeld = 0;
-  /** The worst handoff walker count and the tiles Proton stood on outside her area since the last snapshot (`latchWorst`). */
+  /** The worst handoff walker count and the tiles Proton stood on outside her area since the last `resetLatches` (`latchWorst`). */
   private worstWalkers = 0;
   private strayTiles = new Set<string>();
-  /** Every tile she stood on since the last snapshot, for the self-test to check against the layout itself. */
+  /** Every tile she stood on since the last `resetLatches`, for the self-test to check against the layout itself. */
   private protonTiles = new Set<string>();
   /** Since when (the tick clock) each subagent has held a station and worked there, by subagent id. */
   private workingSince = new Map<number, number>();
@@ -2462,9 +2462,16 @@ export class AeroOffice {
     this.latchWorst();
   }
 
+  /** Starts a window the self-test checks: the latches below are emptied here and by nothing else (a snapshot only reads them). */
+  resetLatches(): void {
+    this.worstWalkers = 0;
+    this.strayTiles.clear();
+    this.protonTiles.clear();
+  }
+
   /**
    * What the self-test looks for between two polls, kept from every sub-step (a sped-up frame runs several, so a reading would miss the
-   * worst): the most handoff walkers at once and the tiles Proton stood on that are not hers. Read and cleared by `snapshot`.
+   * worst): the most handoff walkers at once and the tiles Proton stood on that are not hers. Read by `snapshot` and cleared only by `resetLatches`.
    */
   private latchWorst(): void {
     this.worstWalkers = Math.max(this.worstWalkers, this.activeHandoffs());
@@ -3905,9 +3912,6 @@ export class AeroOffice {
     const worstWalkers = Math.max(this.worstWalkers, this.activeHandoffs());
     const protonStray = [...this.strayTiles];
     const protonTiles = [...this.protonTiles];
-    this.worstWalkers = 0;
-    this.strayTiles.clear();
-    this.protonTiles.clear();
     return {
       update,
       clock: this.clock,
@@ -4059,11 +4063,11 @@ export interface AeroSnapshot {
   update: AeroUpdate | null;
   /** The tick clock in seconds (`+= dt` once a sub-step): what every schedule of the page counts on. */
   clock: number;
-  /** The most handoff walkers at once on any tick since the last snapshot. */
+  /** The most handoff walkers at once on any tick since the last `resetLatches`. */
   worstWalkers: number;
-  /** The tiles ("col,row") Proton stood on outside her walk area and seats, on any tick since the last snapshot. */
+  /** The tiles ("col,row") Proton stood on outside her walk area and seats, on any tick since the last `resetLatches`. */
   protonStray: string[];
-  /** Every tile ("col,row") she stood on on any tick since the last snapshot (at most 256 distinct). */
+  /** Every tile ("col,row") she stood on on any tick since the last `resetLatches` (at most 256 distinct). */
   protonTiles: string[];
   lounge: {
     floor: number;

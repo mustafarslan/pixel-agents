@@ -550,7 +550,9 @@ test('the snapshot latches the most walkers at once between two reads: it still 
   const first = snap(os);
   assert.equal(first.activeHandoffs, 0, 'nobody is walking now');
   assert.equal(first.worstWalkers, MAX_ACTIVE_HANDOFFS);
-  assert.equal(snap(os).worstWalkers, 0, 'read and cleared');
+  assert.equal(snap(os).worstWalkers, MAX_ACTIVE_HANDOFFS, 'a read keeps the latch');
+  os.aero.resetLatches();
+  assert.equal(snap(os).worstWalkers, 0, 'a reset clears it');
 });
 
 test('nine at once: eight wait and the ninth is placed on the desk with no walk; the rest are walked in order', () => {

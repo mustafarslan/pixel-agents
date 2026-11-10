@@ -873,5 +873,8 @@ test('the snapshot latches the tiles she stood on outside her area since the las
   os.update(0.05);
   const stray = os.aero.snapshot().protonStray;
   assert.ok(stray.includes(key(bad.col, bad.row)), `latched ${stray.join(' ')}`);
-  assert.deepEqual(os.aero.snapshot().protonStray, [], 'read and cleared');
+  assert.ok(os.aero.snapshot().protonStray.includes(key(bad.col, bad.row)), 'a read keeps the latch');
+  os.aero.resetLatches();
+  assert.deepEqual(os.aero.snapshot().protonStray, [], 'a reset clears it');
+  assert.deepEqual(os.aero.snapshot().protonTiles, [], 'and the visited tiles');
 });

@@ -135,6 +135,8 @@ declare global {
       getAero?: () => AeroSnapshot | null;
       /** Aero's subagent meetings, on or off (on by default): the self-test turns them off for steps that count on subagents staying put. */
       setAeroMeetings?: (on: boolean) => void;
+      /** Empties the snapshot's latches (`worstWalkers`, `protonStray`, `protonTiles`): the start of a window the self-test checks. */
+      resetAeroLatches?: () => void;
     };
   }
 }
@@ -187,6 +189,10 @@ export function installTestHooks(officeStateRef: { current: OfficeState | null }
   hooks.getCameraFollowId = () => officeStateRef.current?.cameraFollowId ?? null;
 
   hooks.getAero = () => officeStateRef.current?.aero.snapshot() ?? null;
+
+  hooks.resetAeroLatches = () => {
+    officeStateRef.current?.aero.resetLatches();
+  };
 
   hooks.setAeroMeetings = (on) => {
     officeStateRef.current?.aero.setMeetings(on === true);
