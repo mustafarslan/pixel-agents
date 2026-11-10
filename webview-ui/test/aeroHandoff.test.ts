@@ -541,6 +541,18 @@ test('at most two walk at once: three senders deliver, one after the other has r
   assert.equal(c.sounds.n, 3);
 });
 
+test('the snapshot latches the most walkers at once between two reads: it still says two after every walk is over', () => {
+  const c = office(3);
+  const { os } = c;
+  send([item(1, RA, RB), item(2, RB, RC), item(3, RC, RA)]);
+  // Nobody reads the snapshot for 90 s: every walk starts and ends unseen, and the latch has the worst count of every tick.
+  for (let i = 0; i < 900; i++) os.update(DT);
+  const first = snap(os);
+  assert.equal(first.activeHandoffs, 0, 'nobody is walking now');
+  assert.equal(first.worstWalkers, MAX_ACTIVE_HANDOFFS);
+  assert.equal(snap(os).worstWalkers, 0, 'read and cleared');
+});
+
 test('nine at once: eight wait and the ninth is placed on the desk with no walk; the rest are walked in order', () => {
   const c = office(2);
   const { os } = c;

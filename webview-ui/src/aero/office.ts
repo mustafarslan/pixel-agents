@@ -562,6 +562,9 @@ export class AeroOffice {
   private huddle: Huddle | null = null;
   private met = new Set<number>();
   private huddlesHeld = 0;
+  /** The worst handoff walker count and the tiles Proton stood on outside her area since the last snapshot (`latchWorst`). */
+  private worstWalkers = 0;
+  private strayTiles = new Set<string>();
   /** Since when (the tick clock) each subagent has held a station and worked there, by subagent id. */
   private workingSince = new Map<number, number>();
   private huddleRetryAt = 0;
@@ -2400,10 +2403,15 @@ export class AeroOffice {
     return getAeroUpdate()?.timeScale ?? 1;
   }
 
-  /** Once a tick, after every character stepped. */
-  afterTick(dt: number): void {
-    this.syncMappings();
-    this.refresh();
+  /**
+   * Once a tick, after every character stepped. A frame at a time scale runs several ticks: `frameStart` is true for the first only, so
+   * the work that follows the static update (not time) runs once a frame.
+   */
+  afterTick(dt: number, frameStart = true): void {
+    if (frameStart) {
+      this.syncMappings();
+      this.refresh();
+    }
     this.clock += dt;
     const update = this.enabled();
     for (const id of [...this.routes.keys()]) {
@@ -2449,6 +2457,20 @@ export class AeroOffice {
     this.stepProton(dt, update);
     this.fx.update(dt);
     for (const npc of this.npcs) npc.greet = Math.max(0, npc.greet - dt);
+    this.latchWorst();
+  }
+
+  /**
+   * What the self-test looks for between two polls, kept from every sub-step (a sped-up frame runs several, so a reading would miss the
+   * worst): the most handoff walkers at once and the tiles Proton stood on that are not hers. Read and cleared by `snapshot`.
+   */
+  private latchWorst(): void {
+    this.worstWalkers = Math.max(this.worstWalkers, this.activeHandoffs());
+    const cat = this.proton;
+    if (cat && this.area && this.protonOn(getAeroUpdate())) {
+      const k = key(cat.col, cat.row);
+      if (!this.area.walk.has(k) && !this.area.seats.has(k) && this.strayTiles.size < 64) this.strayTiles.add(k);
+    }
   }
 
   // ── Effects (pixelfx) ───────────────────────────────────────────
@@ -3877,9 +3899,15 @@ export class AeroOffice {
     this.refresh();
     this.holdFrontDesk();
     const update = getAeroUpdate();
+    const worstWalkers = Math.max(this.worstWalkers, this.activeHandoffs());
+    const protonStray = [...this.strayTiles];
+    this.worstWalkers = 0;
+    this.strayTiles.clear();
     return {
       update,
       clock: this.clock,
+      worstWalkers,
+      protonStray,
       lounge: this.lounge
         ? {
             floor: this.lounge.floor.length,
@@ -4025,6 +4053,10 @@ export interface AeroSnapshot {
   update: AeroUpdate | null;
   /** The tick clock in seconds (`+= dt` once a sub-step): what every schedule of the page counts on. */
   clock: number;
+  /** The most handoff walkers at once on any tick since the last snapshot. */
+  worstWalkers: number;
+  /** The tiles ("col,row") Proton stood on outside her walk area and seats, on any tick since the last snapshot. */
+  protonStray: string[];
   lounge: {
     floor: number;
     seats: string[];

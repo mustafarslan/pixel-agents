@@ -1518,10 +1518,10 @@ export class OfficeState {
   /** One frame: the self-test's time scale (an update's `timeScale`, 1 without it) runs that many normal-`dt` sub-steps, never one scaled `dt`. */
   update(dt: number): void {
     const steps = this.aero.timeScale();
-    for (let i = 0; i < steps; i++) this.step(dt);
+    for (let i = 0; i < steps; i++) this.step(dt, i === 0);
   }
 
-  private step(dt: number): void {
+  private step(dt: number, frameStart: boolean): void {
     // Furniture animation cycling
     const prevFrame = Math.floor(this.furnitureAnimTimer / FURNITURE_ANIM_INTERVAL_SEC);
     this.furnitureAnimTimer += dt;
@@ -1564,7 +1564,7 @@ export class OfficeState {
     for (const id of toDelete) {
       this.characters.delete(id);
     }
-    this.aero.afterTick(dt);
+    this.aero.afterTick(dt, frameStart);
 
     // ── Pet FSM ────────────────────────────────────────────────
     // Pets look for someone to follow among the characters on this floor only.

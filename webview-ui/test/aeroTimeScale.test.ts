@@ -93,21 +93,34 @@ test('a scaled frame is N normal-dt steps: a walker stands where N plain frames 
   const fast = walk(8, 40);
   const plain = walk(1, 320);
   assert.deepEqual(fast, plain);
+  // And in the middle of the walk, where one scaled step would already have landed somewhere else.
+  assert.deepEqual(walk(8, 5), walk(1, 40));
+  assert.deepEqual(walk(8, 11), walk(1, 88));
 });
 
-test('the page has one clock: no schedule in src/aero reads the wall clock', () => {
-  const dir = join(import.meta.dirname, '..', 'src', 'aero');
+/** UI code that is no schedule of the office: a blob URL's release, a touch tap's length, a new furniture uid. */
+const NOT_SCHEDULES = [
+  'office/layout/exportLayout.ts',
+  'office/components/useCanvasTouchGestures.ts',
+  'office/editor/editorActions.ts',
+];
+
+test('the page has one clock: no schedule in src/aero or src/office reads the wall clock or a timer', () => {
+  const root = join(import.meta.dirname, '..', 'src');
   const bad: string[] = [];
   const walkDir = (d: string): void => {
     for (const e of readdirSync(d, { withFileTypes: true })) {
       const p = join(d, e.name);
       if (e.isDirectory()) walkDir(p);
       else if (/\.tsx?$/.test(e.name)) {
+        const rel = p.slice(root.length + 1);
+        if (NOT_SCHEDULES.includes(rel)) continue;
         const text = readFileSync(p, 'utf8');
-        if (/Date\.now\(|performance\.now\(|setTimeout\(|setInterval\(/.test(text)) bad.push(p);
+        if (/Date\.now\(|new Date\(|performance\.now\(|setTimeout\(|setInterval\(/.test(text)) bad.push(rel);
       }
     }
   };
-  walkDir(dir);
+  walkDir(join(root, 'aero'));
+  walkDir(join(root, 'office'));
   assert.deepEqual(bad, []);
 });

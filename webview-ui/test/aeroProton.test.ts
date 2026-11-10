@@ -850,3 +850,25 @@ test('the view she is drawn from: her sprite, her pixel position, z-sorted by he
   assert.equal(os.aero.protonView(), null);
   assert.deepEqual(os.aero.protonSprites(), []);
 });
+
+// ── What a sped-up frame must not hide ───────────────────────────
+
+test('the snapshot latches the tiles she stood on outside her area since the last read, whatever the frame rate', () => {
+  const os = office(seeded(71), { timeScale: 8 });
+  run(os, 20, 0.05);
+  assert.deepEqual(os.aero.snapshot().protonStray, [], 'she wanders inside her area');
+  const area = (os.aero as unknown as { area: { walk: Set<string>; seats: Set<string> } }).area;
+  let bad: { col: number; row: number } | null = null;
+  for (let r = 0; r < ROWS && !bad; r++) {
+    for (let c = 0; c < COLS && !bad; c++) {
+      if (!area.walk.has(key(c, r)) && !area.seats.has(key(c, r))) bad = { col: c, row: r };
+    }
+  }
+  assert.ok(bad, 'the layout has a tile outside her area');
+  os.aero.proton!.place(bad);
+  // One frame (eight sub-steps) is all it takes: she leaves the tile again within it, and the snapshot still says she stood there.
+  os.update(0.05);
+  const stray = os.aero.snapshot().protonStray;
+  assert.ok(stray.includes(key(bad.col, bad.row)), `latched ${stray.join(' ')}`);
+  assert.deepEqual(os.aero.snapshot().protonStray, [], 'read and cleared');
+});
