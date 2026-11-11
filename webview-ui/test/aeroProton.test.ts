@@ -15,9 +15,9 @@ import { afterEach, test } from 'vitest';
 import { getAeroUpdate, resetAeroUpdate, setAeroUpdate } from '../src/aero/office.js';
 import { drawAeroOverlay } from '../src/aero/overlay.js';
 import {
+  ballSpotDirs,
   CARE,
   CARE_GRIDS,
-  ballSpotDirs,
   CARE_PALETTE,
   carePlan,
   pickKind,
