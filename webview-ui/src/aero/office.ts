@@ -63,7 +63,11 @@ import {
 import { assignFirstNames, lookKey, pickLook, roleFromSlug } from './names.js';
 import {
   ATRIUM_HEAD,
+  ballSpotDirs,
   CAFE_SPOTS,
+  CARE_SPRITES,
+  type CarePlan,
+  carePlan,
   podOrigins,
   Proton,
   type ProtonArea,
@@ -71,6 +75,7 @@ import {
   type ProtonSpot,
   protonSpriteOf,
   type ProtonWorld,
+  SPOT_KINDS,
   type SpotKind,
 } from './proton.js';
 import {
@@ -597,7 +602,19 @@ export class AeroOffice {
   /** Her tiles, her own blocked set and the spots that do not change with the layout (worked out in `refresh`). */
   private area: ProtonArea | null = null;
   private napSeats: Array<Tile & { seat: string }> = [];
-  private fixedSpots: Record<'sun' | 'desk' | 'cafe', Tile[]> = { sun: [], desk: [], cafe: [] };
+  private fixedSpots: Record<'sun' | 'desk' | 'cafe' | 'eat' | 'drink' | 'litter', ProtonSpot[]> = {
+    sun: [],
+    desk: [],
+    cafe: [],
+    eat: [],
+    drink: [],
+    litter: [],
+  };
+  /** Her care corner (`refreshProton`): what the layout has room for, the keys of the tiles it blocks, the set they were added to and the ball. */
+  private care: CarePlan = { bowls: [], litter: null, ball: null };
+  private careKeys = new Set<string>();
+  private careIn: Set<string> | null = null;
+  private ball: Tile | null = null;
 
   private readonly os: OfficeState;
 
@@ -706,6 +723,27 @@ export class AeroOffice {
       });
     const { cols, rows, areaTiles } = os.layout;
     this.podAt = podOriginMap(areaTiles, cols, rows);
+    // The bowls and the litter box block people, like furniture: added to the layout's blocked tiles (a rebuilt layout has a new set, which
+    // has none of them) and taken out of the walkable ones. The plan is worked out from the layout's own blocked tiles.
+    const own =
+      this.careIn === os.blockedTiles
+        ? new Set([...os.blockedTiles].filter((k) => !this.careKeys.has(k)))
+        : os.blockedTiles;
+    // Only the open office has a care corner (it has turnstiles): a Rooms layout with a room named Café gets no invisible blocked tiles.
+    this.care =
+      turnstiles.length > 0
+        ? carePlan({ cols, rows, areaTiles, blocked: own })
+        : { bowls: [], litter: null, ball: null };
+    this.careKeys = new Set(
+      [...this.care.bowls.map((b) => b.bowl), ...(this.care.litter ? [this.care.litter] : [])].map(
+        (t) => key(t.col, t.row),
+      ),
+    );
+    for (const k of this.careKeys) os.blockedTiles.add(k);
+    this.careIn = os.blockedTiles;
+    if (this.careKeys.size > 0) {
+      os.walkableTiles = os.walkableTiles.filter((t) => !this.careKeys.has(key(t.col, t.row)));
+    }
     const area = protonArea({
       cols,
       rows,
@@ -715,6 +753,7 @@ export class AeroOffice {
       turnstiles,
       sofaSeats: sofas,
       loungeSeats,
+      boxes: this.care.litter ? [this.care.litter] : [],
     });
     this.area = area;
     this.napSeats = sofas.filter((s) => area.seats.has(key(s.col, s.row)));
@@ -735,7 +774,19 @@ export class AeroOffice {
         ]),
       ),
       cafe: inside(CAFE_SPOTS),
+      eat: this.bowlSpots('eat', area),
+      drink: this.bowlSpots('drink', area),
+      litter:
+        this.care.litter !== null && area.seats.has(key(this.care.litter.col, this.care.litter.row))
+          ? [{ ...this.care.litter }]
+          : [],
     };
+    // The ball stays where she left it; it goes back to its start when the layout leaves it outside her walk area.
+    const start = this.care.ball;
+    if (start === null || !area.walk.has(key(start.col, start.row))) this.ball = null;
+    else if (this.ball === null || !area.walk.has(key(this.ball.col, this.ball.row))) {
+      this.ball = { col: start.col, row: start.row };
+    }
     const cat = this.proton;
     if (cat) {
       cat.giveUp(false);
@@ -743,6 +794,13 @@ export class AeroOffice {
       if (!area.walk.has(key(cat.col, cat.row)))
         this.placeProton(cat, this.nearestWalk(cat.col, cat.row));
     }
+  }
+
+  /** Where she eats or drinks: the tile beside the bowl, facing it. */
+  private bowlSpots(kind: 'eat' | 'drink', area: ProtonArea): ProtonSpot[] {
+    return this.care.bowls
+      .filter((b) => b.kind === kind && area.walk.has(key(b.from.col, b.from.row)))
+      .map((b) => ({ col: b.from.col, row: b.from.row, face: b.face }));
   }
 
   /** The walk tile nearest (col, row) by Manhattan distance, the first in row order on a tie; null when she has no area. */
@@ -814,6 +872,10 @@ export class AeroOffice {
       tileMap: this.os.tileMap,
       walk: area.walk,
       spots: (kind) => this.protonSpots(kind),
+      ball: this.ball,
+      setBall: (tile) => {
+        this.ball = { col: tile.col, row: tile.row };
+      },
     };
   }
 
@@ -823,10 +885,35 @@ export class AeroOffice {
       case 'desk':
         return this.fixedSpots[kind];
       case 'sun':
-      case 'cafe': {
+      case 'cafe':
+      case 'eat':
+      case 'drink':
+      case 'litter': {
         // The café's fronts and the terrace are where breaks are taken: not a tile somebody stands on or is walking to.
         const taken = this.occupied(Number.NaN);
         return this.fixedSpots[kind].filter((t) => !taken.has(key(t.col, t.row)));
+      }
+      case 'ball': {
+        // Beside the ball with the ball straight ahead and room beyond it to roll: she bats it away from her.
+        let ball = this.ball;
+        if (ball === null || this.area === null) return [];
+        let dirs = ballSpotDirs(this.area.walk, ball);
+        // A ball nobody can bat from anywhere (a corner or a dead end) goes back to its start.
+        const start = this.care.ball;
+        if (dirs.length === 0 && start !== null) {
+          ball = this.ball = { col: start.col, row: start.row };
+          dirs = ballSpotDirs(this.area.walk, ball);
+        }
+        const taken = this.occupied(Number.NaN);
+        const out: ProtonSpot[] = [];
+        for (const face of dirs) {
+          const dc = face === Direction.RIGHT ? 1 : face === Direction.LEFT ? -1 : 0;
+          const dr = face === Direction.DOWN ? 1 : face === Direction.UP ? -1 : 0;
+          if (!taken.has(key(ball.col - dc, ball.row - dr))) {
+            out.push({ col: ball.col - dc, row: ball.row - dr, face });
+          }
+        }
+        return out;
       }
       case 'sofa': {
         const taken = this.occupied(Number.NaN);
@@ -883,7 +970,19 @@ export class AeroOffice {
       const at = cat.spotTile();
       if (this.occupied(Number.NaN).has(key(at.col, at.row))) cat.giveUp();
     }
-    cat.update(dt, this.protonWorld(update));
+    const world = this.protonWorld(update);
+    if (this.visiting !== null && cat.visit(this.visiting, world)) this.visiting = null;
+    cat.update(dt, world);
+  }
+
+  /** The kind a test asked her to go to next (`protonVisit`), until she has a free spot of it. */
+  private visiting: SpotKind | null = null;
+
+  /** Test hook (e2e only): she gives up what she is doing and goes to a spot of `kind` as soon as one is free. False for a kind that doesn't exist. */
+  protonVisit(kind: string): boolean {
+    if (!(SPOT_KINDS as readonly string[]).includes(kind)) return false;
+    this.visiting = kind as SpotKind;
+    return true;
   }
 
   /** What the renderer draws for her, or null when she is not on show. */
@@ -902,7 +1001,24 @@ export class AeroOffice {
   /** The extra sprites for the renderer: Proton, or none. */
   protonSprites(): ExtraSprite[] {
     const view = this.protonView();
-    return view ? [view] : [];
+    return view ? [view, ...this.careSprites()] : [];
+  }
+
+  /** Her bowls, the litter box and the ball, each at the bottom of its tile like her, sorted just under her own row. */
+  private careSprites(): ExtraSprite[] {
+    const at = (t: Tile, sprite: ExtraSprite['sprite']): ExtraSprite => ({
+      sprite,
+      x: t.col * TILE_SIZE + TILE_SIZE / 2,
+      y: t.row * TILE_SIZE + TILE_SIZE / 2,
+      zY: t.row * TILE_SIZE + TILE_SIZE - 1,
+    });
+    const out: ExtraSprite[] = [];
+    for (const b of this.care.bowls) {
+      out.push(at(b.bowl, b.kind === 'eat' ? CARE_SPRITES.food : CARE_SPRITES.water));
+    }
+    if (this.care.litter) out.push(at(this.care.litter, CARE_SPRITES.litter));
+    if (this.ball) out.push(at(this.ball, CARE_SPRITES.ball));
+    return out;
   }
 
   /**
@@ -4006,6 +4122,12 @@ export class AeroOffice {
       worstWalkers,
       protonStray,
       protonTiles,
+      care: {
+        food: this.care.bowls.find((b) => b.kind === 'eat')?.bowl ?? null,
+        water: this.care.bowls.find((b) => b.kind === 'drink')?.bowl ?? null,
+        litter: this.care.litter,
+        ball: this.ball,
+      },
       lounge: this.lounge
         ? {
             floor: this.lounge.floor.length,
@@ -4166,6 +4288,13 @@ export interface AeroSnapshot {
   worstWalkers: number;
   /** The tiles ("col,row") Proton stood on outside her walk area and seats, on any tick since the last `resetLatches`. */
   protonStray: string[];
+  /** Her care corner: the food and water bowls, the litter box and the ball (each null when the layout has no room for it). */
+  care: {
+    food: Tile | null;
+    water: Tile | null;
+    litter: Tile | null;
+    ball: Tile | null;
+  };
   /** Every tile ("col,row") she stood on on any tick since the last `resetLatches` (at most 256 distinct). */
   protonTiles: string[];
   lounge: {
