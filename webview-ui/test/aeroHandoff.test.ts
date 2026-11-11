@@ -24,7 +24,8 @@ import {
   receiverStop,
 } from '../src/aero/handoff.js';
 import { resetAeroUpdate, setAeroUpdate } from '../src/aero/office.js';
-import { AREA_LABEL_FALLBACK_COLOR } from '../src/constants.js';
+import { drawAeroOverlay } from '../src/aero/overlay.js';
+import { AERO_CAPSULE_GATE, AREA_LABEL_FALLBACK_COLOR } from '../src/constants.js';
 import { OfficeState } from '../src/office/engine/officeState.js';
 import { buildDynamicCatalog } from '../src/office/layout/furnitureCatalog.js';
 import { buildAeroSprites } from '../src/office/sprites/aeroFurniture.js';
@@ -175,6 +176,7 @@ interface Item {
   seq: number;
   fromRoom: string | null;
   toRoom: string | null;
+  gated?: boolean;
 }
 
 const upd = (
@@ -838,4 +840,350 @@ test('the plan is busy rather than stacking on a tube front or a pod tile somebo
     again?.stages.map((s) => s.act),
     ['deliver'],
   );
+});
+
+// ── The gated route: the capsule on the meeting-room whiteboard (docs/work/phase6-gated-route/plan.md) ──
+
+/** The whiteboard is at (32,18), 2 by 2: its front tile is (32,20), in the Lounge. */
+const BOARD_FRONT = { col: 32, row: 20 };
+const gatedItem = (seq: number, from: string | null, to: string | null): Item => ({
+  ...item(seq, from, to),
+  gated: true,
+});
+const onBoard = (os: OfficeState) => snap(os).boardCapsules;
+const pins = (os: OfficeState) => snap(os).handoffPins;
+
+test('the gated plan: the sender pins at the board front and goes home; the receiver lifts it there and takes it to its desk', () => {
+  const party = (col: number, pod: boolean) => ({
+    home: { col, row: 4 },
+    seatUid: `s${col}`,
+    pod: pod ? { col: col - 3, row: 2 } : null,
+  });
+  const a = party(4, true);
+  const b = party(13, true);
+  const tube = { col: 20, row: 10 };
+  const free = () => true;
+  const pin = planHandoff({
+    sender: a,
+    receiver: b,
+    tube,
+    free,
+    board: BOARD_FRONT,
+    route: 'pin',
+  })!;
+  assert.equal(pin.walker, 'sender');
+  assert.deepEqual(
+    pin.stages.map((s) => [s.act, s.tile.col, s.tile.row]),
+    [
+      ['pin', 32, 20],
+      ['home', 4, 4],
+    ],
+  );
+  assert.equal(pin.stages[0].dir, Direction.UP);
+  assert.equal(pin.stages[0].pause, HANDOFF_PAUSE_SEC);
+  assert.equal(pin.busy, false);
+  const lift = planHandoff({
+    sender: a,
+    receiver: b,
+    tube,
+    free,
+    board: BOARD_FRONT,
+    route: 'board',
+  })!;
+  assert.equal(lift.walker, 'receiver');
+  assert.deepEqual(
+    lift.stages.map((s) => [s.act, s.tile.col, s.tile.row]),
+    [
+      ['unpin', 32, 20],
+      ['deliver', 13, 4],
+    ],
+  );
+  // Nobody to pin it (no sender, no whiteboard), or nobody to lift it (the receiver has no pod, no whiteboard).
+  assert.equal(
+    planHandoff({ sender: null, receiver: b, tube, free, board: BOARD_FRONT, route: 'pin' }),
+    null,
+  );
+  assert.equal(
+    planHandoff({ sender: a, receiver: b, tube, free, board: null, route: 'pin' }),
+    null,
+  );
+  assert.equal(
+    planHandoff({
+      sender: a,
+      receiver: party(13, false),
+      tube,
+      free,
+      board: BOARD_FRONT,
+      route: 'board',
+    }),
+    null,
+  );
+  assert.equal(
+    planHandoff({ sender: a, receiver: null, tube, free, board: BOARD_FRONT, route: 'board' }),
+    null,
+  );
+  assert.equal(
+    planHandoff({ sender: a, receiver: b, tube, free, board: null, route: 'board' }),
+    null,
+  );
+  // A held board front waits; a capsule already lifted only goes to the desk.
+  const held = (t: { col: number; row: number }) => !(t.col === 32 && t.row === 20);
+  assert.equal(
+    planHandoff({ sender: a, receiver: b, tube, free: held, board: BOARD_FRONT, route: 'pin' })
+      ?.busy,
+    true,
+  );
+  const lifted = planHandoff({
+    sender: a,
+    receiver: b,
+    tube,
+    free,
+    board: BOARD_FRONT,
+    route: 'board',
+    collected: true,
+  });
+  assert.deepEqual(
+    lifted?.stages.map((s) => s.act),
+    ['deliver'],
+  );
+});
+
+test('the book: gate state follows (floor, seq, gated): a first list pins, a new gated seq walks, a clear lifts, leaving the list forgets', () => {
+  const book = new HandoffBook();
+  book.ingest(FLOOR, [gatedItem(1, RA, RB)]);
+  assert.equal(book.gate.get(1), 'pinned', 'the first list pins with no walk');
+  assert.equal(book.queue.length, 0);
+  assert.equal(book.desk.size, 0, 'a gated handoff has no desk capsule');
+  assert.deepEqual(book.takePops(), []);
+  book.ingest(FLOOR, [gatedItem(1, RA, RB), gatedItem(2, RA, RB)]);
+  assert.equal(book.gate.get(2), 'walking');
+  assert.deepEqual(
+    book.queue.map((q) => [q.seq, q.route]),
+    [[2, 'pin']],
+  );
+  // Seq 1 clears: the receiver lifts it from the board. Seq 2 stays gated.
+  book.ingest(FLOOR, [item(1, RA, RB), gatedItem(2, RA, RB)]);
+  assert.equal(book.gate.get(1), 'lifting');
+  assert.deepEqual(
+    book.queue.map((q) => [q.seq, q.route]),
+    [
+      [2, 'pin'],
+      [1, 'board'],
+    ],
+  );
+  assert.equal(book.desk.has(1), false, 'the desk capsule comes only with the delivery');
+  // The same list again queues nothing more.
+  book.ingest(FLOOR, [item(1, RA, RB), gatedItem(2, RA, RB)]);
+  assert.equal(book.queue.length, 2);
+  // Both leave the list: nothing is left of either.
+  book.ingest(FLOOR, []);
+  assert.equal(book.gate.size, 0);
+  assert.equal(book.queue.length, 0);
+  assert.equal(book.waitingCount, 0);
+});
+
+test('the book: a gate that clears before its pin walk is done is an ordinary handoff; a nobody-to-carry pin or lift pops', () => {
+  const book = new HandoffBook();
+  book.ingest(FLOOR, []);
+  book.ingest(FLOOR, [gatedItem(3, RA, RB)]);
+  assert.equal(book.gate.get(3), 'walking');
+  book.ingest(FLOOR, [item(3, RA, RB)]);
+  assert.equal(book.gate.has(3), false);
+  assert.deepEqual(
+    book.queue.map((q) => [q.seq, q.route]),
+    [[3, undefined]],
+    'back in the queue as a plain handoff',
+  );
+  // Nobody can pin it: it pops (and is pinned at once). Nobody can lift it: it pops too, and the board is clear.
+  const nobody = () => false;
+  book.ingest(FLOOR, [item(3, RA, RB), gatedItem(4, RB, RA)], nobody);
+  assert.equal(book.gate.get(4), 'pinned');
+  book.ingest(FLOOR, [item(3, RA, RB), item(4, RB, RA)], nobody);
+  assert.equal(book.gate.has(4), false);
+  assert.deepEqual(
+    book.takePops().map((p) => [p.item.seq, p.kind]),
+    [
+      [4, 'pin'],
+      [4, 'lift'],
+    ],
+  );
+});
+
+test('a gated handoff: the sender pins the capsule to the whiteboard and goes home; when the gate clears the receiver lifts it and takes it to its desk', () => {
+  const c = office(2);
+  const { os } = c;
+  const fx = capsules(os);
+  send([gatedItem(5, RA, RB)]);
+  waitFor(os, () => walking(os, 1), 5, 'the sender sets off');
+  assert.equal(os.aero.carriedCapsules().length, 1, 'it carries the capsule');
+  assert.deepEqual(onBoard(os), [], 'nothing is on the board before it arrives');
+  waitFor(os, () => onBoard(os).length === 1, 60, 'pinned');
+  assert.deepEqual(tileOf(os, 1), BOARD_FRONT);
+  assert.equal(os.characters.get(1)!.dir, Direction.UP);
+  assert.equal(snap(os).handoffsGated, 1);
+  assert.deepEqual(pins(os), [{ seq: 5, id: 1, ...BOARD_FRONT }]);
+  assert.equal(os.aero.carriedCapsules().length, 0);
+  assert.equal(delivered(os), 0, 'a gated handoff is not delivered');
+  assert.deepEqual(snap(os).deskCapsules, []);
+  waitFor(os, () => atDesk(os, 1) && !walking(os, 1), 60, 'the sender is home');
+  run(os, 20);
+  assert.equal(onBoard(os).length, 1, 'it stays while the gate is shut');
+  assert.equal(delivered(os), 0);
+  assert.equal(walking(os, 2), false);
+  // The gate clears: the receiver walks to the board, takes the capsule and carries it to its desk.
+  send([item(5, RA, RB)]);
+  waitFor(os, () => walking(os, 2), 5, 'the receiver sets off');
+  assert.equal(onBoard(os).length, 1, 'still pinned while it walks over');
+  waitFor(os, () => onBoard(os).length === 0, 60, 'the capsule is taken off the board');
+  assert.deepEqual(tileOf(os, 2), BOARD_FRONT);
+  assert.equal(os.aero.carriedCapsules().length, 1);
+  assert.equal(delivered(os), 0);
+  waitFor(os, () => delivered(os) === 1, 60, 'delivered');
+  assert.deepEqual(snap(os).handoffDeliveries, [{ seq: 5, id: 2, ...homeOf(os, 2) }]);
+  assert.deepEqual(snap(os).deskCapsules, [{ seq: 5, col: 14, row: 2 }]);
+  assert.equal(snap(os).handoffsGated, 0);
+  assert.equal(c.sounds.n, 0, 'no tube whoosh on this route');
+  assert.equal(capsules(os), fx, 'and no tube capsule');
+  assert.equal(snap(os).tubeSent, 0);
+  waitFor(os, () => atDesk(os, 2) && !walking(os, 2), 60, 'the receiver is at its desk');
+  run(os, 10);
+  assert.equal(delivered(os), 1, 'once');
+});
+
+test('the first list pins a gated handoff with no walk; its clear then walks the receiver', () => {
+  const c = office(2);
+  const { os } = c;
+  send([gatedItem(7, RA, RB)], OTHER_FLOOR);
+  run(os, 10);
+  assert.equal(walking(os, 1) || walking(os, 2), false);
+  assert.equal(onBoard(os).length, 1);
+  assert.deepEqual(pins(os), [], 'placed, not pinned by a walk');
+  assert.equal(delivered(os), 0);
+  assert.equal(c.sounds.n, 0);
+  send([item(7, RA, RB)], OTHER_FLOOR);
+  waitFor(os, () => delivered(os) === 1, 60, 'delivered');
+  assert.equal(snap(os).handoffDeliveries[0].id, 2);
+  assert.equal(onBoard(os).length, 0);
+});
+
+test('a gated handoff whose seq leaves the list is cleared with no delivery, on the board or on its way', () => {
+  const c = office(2);
+  const { os } = c;
+  send([gatedItem(5, RA, RB)]);
+  waitFor(os, () => walking(os, 1), 5, 'the sender sets off');
+  send([]);
+  run(os, 0.3);
+  assert.equal(walking(os, 1), false, 'the walk is over');
+  waitFor(os, () => atDesk(os, 1), 60, 'the sender is home');
+  assert.deepEqual(onBoard(os), []);
+  // Now one that is pinned.
+  send([gatedItem(6, RA, RB)]);
+  waitFor(os, () => onBoard(os).length === 1, 60, 'pinned');
+  send([]);
+  run(os, 0.3);
+  assert.deepEqual(onBoard(os), []);
+  run(os, 20);
+  assert.equal(delivered(os), 0);
+  assert.equal(walking(os, 2), false);
+  assert.equal(snap(os).handoffsGated, 0);
+});
+
+test('a gate that clears while the sender is still on the way is an ordinary handoff', () => {
+  const c = office(2);
+  const { os } = c;
+  send([gatedItem(5, RA, RB)]);
+  waitFor(os, () => walking(os, 1), 5, 'the sender sets off');
+  send([item(5, RA, RB)]);
+  waitFor(os, () => delivered(os) === 1, 90, 'delivered the plain way');
+  assert.deepEqual(onBoard(os), []);
+  assert.deepEqual(snap(os).handoffDeliveries[0], { seq: 5, id: 1, col: 15, row: 4 });
+  assert.equal(c.sounds.n, 1);
+});
+
+test('the sender is not in the office: the tube pops the capsule onto the board; the clear has the receiver lift it', () => {
+  const c = office(1);
+  const { os } = c;
+  const fx = capsules(os);
+  send([gatedItem(4, RB, RA)]);
+  run(os, 0.3);
+  assert.equal(onBoard(os).length, 1);
+  assert.equal(walking(os, 1), false, 'nobody walks');
+  assert.equal(c.sounds.n, 1, 'the pop at the tube');
+  assert.equal(capsules(os), fx + 1);
+  assert.equal(snap(os).tubeSent, 0, 'a pop is not a post');
+  assert.deepEqual(pins(os), [{ seq: 4, id: -1, ...BOARD_FRONT }]);
+  send([item(4, RB, RA)]);
+  waitFor(os, () => delivered(os) === 1, 90, 'delivered');
+  assert.deepEqual(snap(os).handoffDeliveries, [{ seq: 4, id: 1, ...homeOf(os, 1) }]);
+  assert.equal(onBoard(os).length, 0);
+  assert.equal(c.sounds.n, 1, 'the lift adds none');
+});
+
+test('the receiver is not in the office when the gate clears: the capsule pops at the tube, the board is cleared, tubeSent goes up', () => {
+  const c = office(1);
+  const { os } = c;
+  send([gatedItem(5, RA, RB)]);
+  waitFor(os, () => onBoard(os).length === 1, 60, 'pinned');
+  waitFor(os, () => atDesk(os, 1) && !walking(os, 1), 60, 'home');
+  const sounds = c.sounds.n;
+  const fx = capsules(os);
+  send([item(5, RA, RB)]);
+  run(os, 0.3);
+  assert.deepEqual(onBoard(os), []);
+  assert.equal(snap(os).tubeSent, 1);
+  assert.equal(c.sounds.n, sounds + 1);
+  assert.equal(capsules(os), fx + 1);
+  assert.equal(walking(os, 1), false);
+  assert.equal(delivered(os), 0, 'a pop to nobody is not a delivery');
+});
+
+/** A canvas that records the fills of the amber dot: the colour and the alpha it was drawn with. */
+function amberDots(os: OfficeState): number[] {
+  const alphas: number[] = [];
+  const state: Record<string, unknown> = { globalAlpha: 1 };
+  const ctx = new Proxy(
+    {},
+    {
+      get: (_t, name: string) => {
+        if (name === 'fillRect')
+          return () => {
+            if (state.fillStyle === AERO_CAPSULE_GATE) alphas.push(state.globalAlpha as number);
+          };
+        if (name === 'measureText') return () => ({ width: 10 });
+        return name in state ? state[name] : () => undefined;
+      },
+      set: (_t, name: string, value: unknown) => {
+        state[name] = value;
+        return true;
+      },
+    },
+  ) as unknown as CanvasRenderingContext2D;
+  drawAeroOverlay(ctx, os, 0, 0, 2);
+  return alphas;
+}
+
+test('the amber dot is drawn on each pinned capsule, pulses on the office clock, and is steady under Reduced Motion', () => {
+  const c = office(2);
+  const { os } = c;
+  assert.deepEqual(amberDots(os), [], 'no dot with nothing pinned');
+  send([gatedItem(5, RA, RB), gatedItem(6, RB, RA)]);
+  waitFor(os, () => onBoard(os).length === 2, 90, 'both pinned');
+  assert.equal(amberDots(os).length, 2);
+  const seen = new Set<number>();
+  for (let i = 0; i < 16; i++) {
+    run(os, 0.1);
+    for (const a of amberDots(os)) seen.add(Math.round(a * 100));
+  }
+  assert.ok(seen.size > 3, `the alpha moves with the clock (${[...seen]})`);
+  const g = globalThis as unknown as { window?: unknown };
+  const before = g.window;
+  g.window = { matchMedia: () => ({ matches: true }) };
+  try {
+    for (let i = 0; i < 6; i++) {
+      run(os, 0.2);
+      assert.deepEqual(amberDots(os), [1, 1], 'steady');
+    }
+  } finally {
+    g.window = before;
+  }
 });

@@ -19,7 +19,7 @@
  *       "labels":   { "Pod 1": { "name": "feat-auth", "dim": false }, "Pod 2": { "name": "", "dim": true }, ... }
  *     },
  *     "floor": { "id": "<12 hex>", "number": 2, "name": "web", "rooms": ["<12 hex>" | "prruns", ...] },
- *     "handoffs": [ { "seq": 12, "fromRoom": "<12 hex>" | null, "toRoom": "<12 hex>" | null } ],
+ *     "handoffs": [ { "seq": 12, "fromRoom": "<12 hex>" | null, "toRoom": "<12 hex>" | null, "gated": true } ],
  *     "timeScale": 8
  *   }
  *
@@ -32,7 +32,8 @@
  *   `name` 1..32 characters, `rooms` at most 64 distinct directory names (12 hex, or `prruns`, which is on every floor). A
  *   character whose directory name is not in `rooms` (and its subagents and teammates) is not on this floor: hidden, with no seat.
  * - `handoffs`: at most 16, each exactly `seq` (an integer, 0..2147483647, once in the list), `fromRoom` and `toRoom` (a worktree's
- *   room: 12 hex, or null when that side is not on a row; not both null, not the same). Nothing else crosses: no role, task or text.
+ *   room: 12 hex, or null when that side is not on a row; not both null, not the same) and, only when it waits on the owner's verdict,
+ *   `gated: true` (a Bool when present; absent is false). Nothing else crosses: no role, task or text.
  * - `timeScale`: an integer 1..8, the sub-steps each frame runs (the self-test's speed-up; a Release build of Aero never sends it).
  * - `agents`: a project agent has the `floor` (the repo's floor id) it is staff of, or, with no floor (Rooms style, no repo),
  *   the `room` of its worktree; never both. The owner's have neither: one shared set, on the floor on show unless its roster
@@ -117,6 +118,8 @@ export interface AeroHandoff {
   seq: number;
   fromRoom: string | null;
   toRoom: string | null;
+  /** The handoff waits on the owner's verdict: its capsule is pinned to the meeting-room whiteboard. Absent is false. */
+  gated?: boolean;
 }
 
 export interface AeroUpdate {
@@ -248,8 +251,11 @@ function parseHandoffs(raw: unknown): AeroHandoff[] | null {
   const seen = new Set<number>();
   const out: AeroHandoff[] = [];
   for (const item of raw) {
-    if (!isPlainObject(item) || !hasKeys(item, ['fromRoom', 'seq', 'toRoom'])) return null;
-    const { seq, fromRoom, toRoom } = item;
+    if (!isPlainObject(item) || !hasKeysAmong(item, ['fromRoom', 'seq', 'toRoom'], ['gated'])) {
+      return null;
+    }
+    const { seq, fromRoom, toRoom, gated } = item;
+    if ('gated' in item && typeof gated !== 'boolean') return null;
     if (typeof seq !== 'number' || !Number.isInteger(seq) || seq < 0 || seq > MAX_HANDOFF_SEQ) {
       return null;
     }
@@ -259,7 +265,13 @@ function parseHandoffs(raw: unknown): AeroHandoff[] | null {
       if (room !== null && (typeof room !== 'string' || !ROOM_RE.test(room))) return null;
     }
     if ((fromRoom === null && toRoom === null) || fromRoom === toRoom) return null;
-    out.push({ seq, fromRoom: fromRoom as string | null, toRoom: toRoom as string | null });
+    const parsed: AeroHandoff = {
+      seq,
+      fromRoom: fromRoom as string | null,
+      toRoom: toRoom as string | null,
+    };
+    if ('gated' in item) parsed.gated = gated as boolean;
+    out.push(parsed);
   }
   return out;
 }

@@ -14,6 +14,7 @@ import {
   AERO_BUBBLE_FILL,
   AERO_BUBBLE_TEXT,
   AERO_CAPSULE_BRASS,
+  AERO_CAPSULE_GATE,
   AERO_CAPSULE_GLASS,
   AERO_NAME_SHADOW,
   AERO_NAME_TEXT,
@@ -189,6 +190,39 @@ function drawCapsule(
   );
 }
 
+/** Whether the system asks for less motion: the amber dot then stays lit instead of pulsing. */
+function reducedMotion(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  );
+}
+
+/** A gated handoff's capsule pinned to the whiteboard, with a pulsing amber dot on its corner (drawn only: it takes no click). */
+function drawBoardCapsule(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  pulse: number,
+  offsetX: number,
+  offsetY: number,
+  zoom: number,
+): void {
+  drawCapsule(ctx, x, y, offsetX, offsetY, zoom);
+  ctx.save();
+  ctx.globalAlpha = 0.45 + 0.55 * pulse;
+  ctx.fillStyle = AERO_CAPSULE_GATE;
+  const size = Math.max(2, Math.round(2 * zoom));
+  ctx.fillRect(
+    Math.round(offsetX + (x + 3) * zoom) - Math.round(size / 2),
+    Math.round(offsetY + (y - 2) * zoom) - Math.round(size / 2),
+    size,
+    size,
+  );
+  ctx.restore();
+}
+
 /** The whiteboard's and the clock's text. */
 function drawWall(
   ctx: CanvasRenderingContext2D,
@@ -261,6 +295,10 @@ export function drawAeroOverlay(
   drawEffects(ctx, os.aero.fx, offsetX, offsetY, zoom);
   drawWall(ctx, os, offsetX, offsetY, zoom);
   drawFloorSign(ctx, os, offsetX, offsetY, zoom);
+  // Gated handoffs: their capsules on the whiteboard, each with a pulsing amber dot (steady under Reduced Motion).
+  const pulse = reducedMotion() ? 1 : os.aero.boardPulse();
+  for (const c of os.aero.boardCapsules())
+    drawBoardCapsule(ctx, c.x, c.y, pulse, offsetX, offsetY, zoom);
 
   // Tower handoffs: the capsule a lead carries, and those lying on the receivers' desks.
   for (const c of os.aero.carriedCapsules()) drawCapsule(ctx, c.x, c.y, offsetX, offsetY, zoom);

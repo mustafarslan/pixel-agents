@@ -578,6 +578,8 @@ export const AERO_PLATE_TEXT = '#f4f1de';
 // ── Aero's tower handoffs: the capsule carried between pods ──
 export const AERO_CAPSULE_BRASS = '#d8a038';
 export const AERO_CAPSULE_GLASS = '#78d8e8';
+/** The pulsing dot on a capsule pinned to the whiteboard: a handoff waiting for the owner's verdict. */
+export const AERO_CAPSULE_GATE = '#f0a020';
 
 // ── Aero's live pods ─────────────────────────────────────────────
 /** The wash over a pod with no live Claude. */

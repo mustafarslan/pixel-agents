@@ -218,7 +218,10 @@ test('handoffs: a role name, a task id, a non-hex room, a bad seq or a 17th item
   const bad: unknown[] = [
     [{ ...item, role: 'builder' }],
     [{ ...item, task: 'T-12' }],
-    [{ ...item, gated: false }],
+    // `gated` is a Bool, nothing else (the gated route: docs/work/phase6-gated-route/plan.md).
+    [{ ...item, gated: 'yes' }],
+    [{ ...item, gated: 1 }],
+    [{ ...item, gated: null }],
     [{ seq: 1, fromRoom: RA }],
     [{ ...item, fromRoom: 'builder' }],
     [{ ...item, toRoom: 'ABCDEFABCDEF' }],
@@ -240,6 +243,15 @@ test('handoffs: a role name, a task id, a non-hex room, a bad seq or a 17th item
   for (const handoffs of bad) assert.equal(parseAeroUpdate(withHandoffs(handoffs)), null);
   const sixteen = Array.from({ length: 16 }, (_, i) => ({ seq: i, fromRoom: RA, toRoom: RB }));
   assert.deepEqual(parseAeroUpdate(withHandoffs(sixteen)), withHandoffs(sixteen));
+});
+
+test('handoffs: gated is an optional Bool, and the list comes back as it was', () => {
+  const list = [
+    { seq: 1, fromRoom: RA, toRoom: RB, gated: true },
+    { seq: 2, fromRoom: RB, toRoom: RA, gated: false },
+    { seq: 3, fromRoom: RA, toRoom: null },
+  ];
+  assert.deepEqual(parseAeroUpdate(withHandoffs(list)), withHandoffs(list));
 });
 
 // ── The self-test time scale (Debug builds only send it) ─────────

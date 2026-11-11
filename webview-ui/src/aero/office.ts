@@ -32,6 +32,7 @@ import {
   deskTile,
   HandoffBook,
   type HandoffParty,
+  type HandoffRoute,
   type HandoffStage,
   MAX_ACTIVE_HANDOFFS,
   planHandoff,
@@ -228,6 +229,10 @@ const FUN_ZONE = 'Fun';
 const QUESTION_TOOL = 'AskUserQuestion';
 /** The tube's capsule effect plays this far above the front tile's centre, at the receiver's breech. */
 const FX_TUBE_RISE = 14;
+/** How far above the tile in front of the whiteboard a pin's burst starts (the board's lower edge). */
+const FX_BOARD_RISE = 8;
+/** The amber dot of a pinned capsule: seconds a pulse takes. */
+const BOARD_PULSE_SEC = 1.6;
 /** The posts kept for the snapshot (the self-test reads them: a one-second stand can fall between two polls). */
 const MAX_TUBE_POSTS = 32;
 
@@ -521,6 +526,8 @@ export class AeroOffice {
   private podAt = new Map<string, Tile>();
   /** The tick clock when the waiting handoffs were last looked at again. */
   private waitingAt = -Infinity;
+  /** The whiteboard's front tile, found once per layout (`whiteboardFront`). */
+  private boardMemo: { walk: unknown; item: LoungeItem; tile: Tile | null } | null = null;
   people: Person[] = [];
   chats = new Map<number, Chat>();
   /** The effects (pixelfx) Aero starts: a burst on the whiteboard, a countdown on the clock, a poof at a person. */
@@ -1526,15 +1533,74 @@ export class AeroOffice {
   }
 
   /** Whether somebody could carry the handoff now (a held tile does not count: that is only a wait). */
-  private plannable(item: AeroHandoff): boolean {
+  private plannable(item: AeroHandoff & { route?: HandoffRoute }): boolean {
     return (
       planHandoff({
         sender: this.partyOf(this.leadOf(item.fromRoom)),
         receiver: this.partyOf(this.leadOf(item.toRoom)),
         tube: this.book?.tube?.queue[0] ?? null,
         free: () => true,
+        board: this.whiteboardFront(),
+        route: item.route,
       }) !== null
     );
+  }
+
+  /**
+   * The tile in front of the meeting-room whiteboard (the first open one under its face), from the layout's own Lounge piece; null
+   * when the pods are not in force, or there is no whiteboard, or nothing walkable in front of it.
+   */
+  whiteboardFront(): Tile | null {
+    const item = this.lounge?.whiteboard;
+    if (!item || !this.podsInForce()) return null;
+    const walk = this.os.walkableTiles;
+    if (this.boardMemo?.walk === walk && this.boardMemo.item === item) return this.boardMemo.tile;
+    let tile: Tile | null = null;
+    for (let i = 0; i < item.w && tile === null; i++) {
+      const t = { col: item.col + i, row: item.row + item.h };
+      if (walk.some((w) => w.col === t.col && w.row === t.row)) tile = t;
+    }
+    this.boardMemo = { walk, item, tile };
+    return tile;
+  }
+
+  /** The capsules pinned to the whiteboard that are drawn (world pixels, the centre of each; as many as fit along its top). */
+  boardCapsules(): Array<{ seq: number; x: number; y: number }> {
+    const item = this.lounge?.whiteboard;
+    if (!item || !this.podsInForce()) return [];
+    const r = whiteboardRect(item);
+    const slots = Math.max(1, Math.floor((r.w - 2) / 8));
+    return this.handoffs
+      .boardSeqs()
+      .slice(0, slots)
+      .map((seq, i) => ({ seq, x: r.x + 5 + i * 8, y: r.y + 3 }));
+  }
+
+  /** The amber dot's brightness, 0..1, cycling on the office clock (the overlay holds it steady under Reduced Motion). */
+  boardPulse(): number {
+    return 0.5 + 0.5 * Math.sin((this.clock * Math.PI * 2) / BOARD_PULSE_SEC);
+  }
+
+  /** The capsules the tube pops for a handoff nobody could walk: onto the board (a pin), or to the receiver's desk or the tube (a lift). */
+  private popGated(): void {
+    for (const { item, kind } of this.handoffs.takePops()) {
+      if (kind === 'lift') {
+        this.placeHandoff(item);
+        continue;
+      }
+      const board = this.whiteboardFront();
+      if (board === null) continue;
+      const front = this.book?.tube?.queue[0];
+      if (front) {
+        this.startFx(
+          'capsule',
+          front.col * TILE_SIZE + TILE_SIZE / 2,
+          front.row * TILE_SIZE + TILE_SIZE / 2 - FX_TUBE_RISE,
+        );
+        this.tubeSound();
+      }
+      this.handoffs.pinned(item, -1, board);
+    }
   }
 
   /** A walk is over for good: no delivery, no requeue; the lead goes back to the usual rules (home). */
@@ -1561,10 +1627,18 @@ export class AeroOffice {
           (h) => this.plannable(h),
         );
         for (const [id, route] of [...this.routes]) {
-          if (route.hand && (reset || !this.handoffs.isListed(route.hand.item.seq)))
+          const hand = route.hand;
+          if (!hand) continue;
+          // A pin walk whose gate cleared (or whose seq left) is over: the handoff is an ordinary one now.
+          const ungated =
+            hand.item.route === 'pin' &&
+            !hand.done &&
+            this.handoffs.gate.get(hand.item.seq) !== 'walking';
+          if (reset || !this.handoffs.isListed(hand.item.seq) || ungated)
             this.cancelHandoff(id, route);
         }
         for (const item of overflow) this.placeHandoff(item);
+        this.popGated();
       }
     }
     if (this.handoffs.waiting.length > 0 && this.clock - this.waitingAt >= 1) {
@@ -1652,6 +1726,8 @@ export class AeroOffice {
         tube,
         free,
         collected: item.collected === true,
+        board: this.whiteboardFront(),
+        route: item.route,
       });
       if (plan === null) {
         this.handoffs.park(item);
@@ -1726,6 +1802,16 @@ export class AeroOffice {
       hand.done = true;
       this.handoffs.finish(hand.item.seq);
       this.post(ch, route);
+    } else if (stage.act === 'pin') {
+      hand.carrying = false;
+      hand.done = true;
+      this.handoffs.pinned(hand.item, ch.id, at);
+      fxAt('burst', at, -FX_BOARD_RISE);
+    } else if (stage.act === 'unpin') {
+      hand.carrying = true;
+      hand.collected = true;
+      this.handoffs.unpinned(hand.item.seq);
+      fxAt('burst', at, -FX_BOARD_RISE);
     } else if (stage.act === 'collect') {
       hand.carrying = true;
       hand.collected = true;
@@ -2478,7 +2564,8 @@ export class AeroOffice {
     const cat = this.proton;
     if (cat && this.area && this.protonOn(getAeroUpdate())) {
       const k = key(cat.col, cat.row);
-      if (!this.area.walk.has(k) && !this.area.seats.has(k) && this.strayTiles.size < 64) this.strayTiles.add(k);
+      if (!this.area.walk.has(k) && !this.area.seats.has(k) && this.strayTiles.size < 64)
+        this.strayTiles.add(k);
       if (this.protonTiles.size < 256) this.protonTiles.add(k);
     }
   }
@@ -4015,6 +4102,14 @@ export class AeroOffice {
       activeHandoffs: this.activeHandoffs(),
       queuedHandoffs: this.handoffs.waitingCount,
       deskCapsules: this.deskCapsules(),
+      boardCapsules: this.boardCapsules().map((c) => ({
+        seq: c.seq,
+        col: Math.floor(c.x / TILE_SIZE),
+        row: Math.floor(c.y / TILE_SIZE),
+      })),
+      handoffsGated:
+        this.lounge?.whiteboard && this.podsInForce() ? this.handoffs.boardSeqs().length : 0,
+      handoffPins: this.handoffs.pins.map((d) => ({ ...d })),
       meetingsOn: this.meetings,
       huddle: this.huddle
         ? {
@@ -4181,6 +4276,10 @@ export interface AeroSnapshot {
   activeHandoffs: number;
   queuedHandoffs: number;
   deskCapsules: Array<{ seq: number; col: number; row: number }>;
+  /** The gated handoffs' capsules pinned to the whiteboard that are drawn (the tile each is drawn on), how many are on it, and the pins: the `seq`, who walked it (-1 for one the tube popped) and the board's front tile. */
+  boardCapsules: Array<{ seq: number; col: number; row: number }>;
+  handoffsGated: number;
+  handoffPins: Array<{ seq: number; id: number; col: number; row: number }>;
   badges: Record<string, number>;
   /** The front desk's people: where they sit and the bubble they show. */
   npcs: Array<{
