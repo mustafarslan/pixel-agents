@@ -29,7 +29,19 @@ export const PROTON_PALETTE: Readonly<Record<string, string>> = {
   o: '#3f3740',
 };
 
-export type ProtonMode = 'walk' | 'sit' | 'sleep' | 'groom' | 'stretch' | 'knead';
+export type ProtonMode =
+  | 'walk'
+  | 'sit'
+  | 'sleep'
+  | 'groom'
+  | 'stretch'
+  | 'knead'
+  | 'eat'
+  | 'drink'
+  | 'bat'
+  | 'pounce'
+  | 'chase'
+  | 'scratch';
 type Frames = readonly [readonly string[], readonly string[], readonly string[]];
 
 /**
@@ -487,6 +499,67 @@ export const PROTON_GRIDS = {
   ],
 } satisfies Record<string, Frames>;
 
+/**
+ * Her head down at a bowl, seen from the side facing right (left is this flipped, once, at load). Eating and drinking show it; a bat
+ * at the ball and scratching the litter show her kneading, a pounce her stretching, and a chase of the ball her walk.
+ */
+export const PROTON_EAT_GRID = [
+  [
+    '................',
+    '................',
+    '................',
+    '................',
+    '..o......o...o..',
+    '.oko...oobooobo.',
+    'obbooooccbbccobo',
+    'obooccccccccccco',
+    'oboccccccccceeco',
+    '.occcccccccccbno',
+    '..occcccccccobbo',
+    '..oddddddddoccco',
+    '..obboocobbocoo.',
+    '..obbo.oobbo....',
+    '...oo....oo.....',
+    '................',
+  ],
+  [
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '.o.....o.o...o..',
+    'oko.oooccbooobo.',
+    'bo.occcccbbccobo',
+    'boocccccccccccco',
+    'obcccccccccceeco',
+    '.oocccccccccobno',
+    '..oddddddddocbbo',
+    '.obbooocoobbocco',
+    '.obbo..ocobbooo.',
+    '..oo......oo....',
+    '................',
+  ],
+  [
+    '................',
+    '................',
+    '................',
+    '..o.............',
+    '.oko.....o...o..',
+    'obbo...oobooobo.',
+    'obo.oooccbbccobo',
+    'obooccccccccccco',
+    '.ooccccccccceeco',
+    '.occcccccccccbno',
+    '..occcccccccobbo',
+    '..oddddddddoccco',
+    '...obbocbboccoo.',
+    '...obboobbo.....',
+    '....oo..oo......',
+    '................',
+  ],
+] satisfies Frames;
+
 const decode = (frames: Frames): SpriteData[] =>
   frames.map((map) => gridToSprite({ map, palette: PROTON_PALETTE } satisfies AeroSpriteGrid));
 const flipX = (sprite: SpriteData): SpriteData => sprite.map((row) => [...row].reverse());
@@ -506,6 +579,7 @@ export const PROTON_SPRITES = {
   groom: decode(PROTON_GRIDS.groom),
   stretch: decode(PROTON_GRIDS.stretch),
   knead: decode(PROTON_GRIDS.knead),
+  eat: { right: decode(PROTON_EAT_GRID), left: decode(PROTON_EAT_GRID).map(flipX) },
 } as const;
 
 /** Seconds a frame of an action loop shows. */
@@ -515,6 +589,13 @@ const SIT_SEQUENCE = [0, 0, 0, 1, 0, 0, 2, 0] as const;
 
 /** The sprite for `mode` facing `dir` after `t` seconds of the same mode. Sitting facing up shows her from behind. */
 export function protonSpriteOf(mode: ProtonMode, dir: Direction, t: number): SpriteData {
+  if (mode === 'eat' || mode === 'drink') {
+    const frames = dir === Direction.LEFT ? PROTON_SPRITES.eat.left : PROTON_SPRITES.eat.right;
+    return frames[Math.floor(t / LOOP_FRAME_SEC) % frames.length];
+  }
+  if (mode === 'bat' || mode === 'scratch') mode = 'knead';
+  else if (mode === 'pounce') mode = 'stretch';
+  else if (mode === 'chase') mode = 'walk';
   if (mode === 'walk') {
     const frames = PROTON_SPRITES.walk[dir];
     const i = Math.floor(t / PET_WALK_FRAME_DURATION_SEC) % PET_WALK_SEQUENCE.length;
@@ -530,14 +611,35 @@ export function protonSpriteOf(mode: ProtonMode, dir: Direction, t: number): Spr
 
 // ── Where she goes ─────────────────────────────────────────────────
 
-export type SpotKind = 'agent' | 'sofa' | 'sun' | 'desk' | 'cafe';
-export const SPOT_KINDS: readonly SpotKind[] = ['agent', 'sofa', 'sun', 'desk', 'cafe'];
+export type SpotKind =
+  'agent' | 'sofa' | 'sun' | 'desk' | 'cafe' | 'ball' | 'eat' | 'drink' | 'litter';
+export const SPOT_KINDS: readonly SpotKind[] = [
+  'agent',
+  'sofa',
+  'sun',
+  'desk',
+  'cafe',
+  'ball',
+  'eat',
+  'drink',
+  'litter',
+];
 
 /** Her first wait, before she moves for the first time, and the longest she stays anywhere. */
 export const PROTON_FIRST_WAIT_SEC = 3;
 const STAY_MIN_SEC = 10;
 const STAY_MAX_SEC = 20;
-const STAY_CAP: Record<SpotKind, number> = { agent: 15, sofa: 20, sun: 20, desk: 12, cafe: 10 };
+const STAY_CAP: Record<SpotKind, number> = {
+  agent: 15,
+  sofa: 20,
+  sun: 20,
+  desk: 12,
+  cafe: 10,
+  ball: 18,
+  eat: 12,
+  drink: 10,
+  litter: 12,
+};
 const KNEAD_SEC = 4;
 const STRETCH_SEC = 3;
 const WANDER_MIN_SEC = 3;
@@ -545,9 +647,22 @@ const WANDER_MAX_SEC = 6;
 const RETRY_SEC = 2;
 const PICK_TRIES = 4;
 
-/** How often each kind of spot is chosen: next to a working agent, a sofa, a sun spot, under a desk, begging by the café. */
+/**
+ * How often each kind of spot is chosen (about 22 s a cycle): next to a working agent, a sofa, a sun spot, under a desk, begging by the
+ * café, the ball, the food and water bowls (more at lunch) and the litter box.
+ */
 export function spotWeights(lunch: boolean): Record<SpotKind, number> {
-  return { agent: 30, sofa: 25, sun: 15, desk: 15, cafe: lunch ? 35 : 15 };
+  return {
+    agent: 23,
+    sofa: 18,
+    sun: 12,
+    desk: 11,
+    cafe: lunch ? 24 : 10,
+    ball: 9,
+    eat: lunch ? 15 : 7,
+    drink: lunch ? 13 : 7,
+    litter: 3,
+  };
 }
 
 /** A kind by weight among those that have a spot now; null when none does. */
@@ -576,10 +691,19 @@ export function stayFor(kind: SpotKind, rng: () => number): number {
 export interface Phase {
   mode: ProtonMode;
   secs: number;
+  /** After a bat she bats the ball on and chases it when the phase ends. */
+  after?: 'chase';
 }
 
-/** What she does during a stay of `stay` seconds, in order. */
-export function planFor(kind: SpotKind, stay: number): Phase[] {
+/** Her first look at the ball, a bat, and a pounce, in seconds. */
+const BALL_WATCH_SEC = 1.5;
+const BALL_BAT_SEC = 0.8;
+const BALL_POUNCE_SEC = 1;
+/** The litter box's last seconds: scratching. */
+const SCRATCH_SEC = 4;
+
+/** What she does during a stay of `stay` seconds, in order; `bats` is how many times she bats the ball (1 or 2). */
+export function planFor(kind: SpotKind, stay: number, bats = 1): Phase[] {
   switch (kind) {
     case 'sofa':
       return [
@@ -603,6 +727,25 @@ export function planFor(kind: SpotKind, stay: number): Phase[] {
         { mode: 'sit', secs: stay / 2 },
         { mode: 'groom', secs: stay / 2 },
       ];
+    case 'eat':
+      return [{ mode: 'eat', secs: stay }];
+    case 'drink':
+      return [{ mode: 'drink', secs: stay }];
+    case 'litter':
+      return [
+        { mode: 'sit', secs: stay - SCRATCH_SEC },
+        { mode: 'scratch', secs: SCRATCH_SEC },
+      ];
+    case 'ball': {
+      const plan: Phase[] = [{ mode: 'sit', secs: BALL_WATCH_SEC }];
+      for (let i = 0; i < bats; i++) {
+        plan.push({ mode: 'bat', secs: BALL_BAT_SEC, after: 'chase' });
+        plan.push({ mode: 'pounce', secs: BALL_POUNCE_SEC });
+      }
+      const rest = stay - plan.reduce((a, p) => a + p.secs, 0);
+      plan.push({ mode: 'sit', secs: Math.max(rest, 0.1) });
+      return plan;
+    }
   }
 }
 
@@ -626,12 +769,14 @@ export interface ProtonAreaInput {
   sofaSeats: readonly Tile[];
   /** The Lounge's seats (unlabelled). */
   loungeSeats: readonly Tile[];
+  /** The litter box: blocked for people, a target for her like a seat. */
+  boxes?: readonly Tile[];
 }
 
 export interface ProtonArea {
   /** The tiles she walks on: labelled, unblocked, not the toilets, the lobby or the turnstile throat, in the largest connected part. */
   walk: Set<string>;
-  /** Seats she may sit on: sofa and Lounge seats beside the walk area. They are blocked tiles, unblocked only as a target. */
+  /** Seats she may sit on: sofa and Lounge seats, and the litter box, beside the walk area. They are blocked tiles, unblocked only as a target. */
   seats: Set<string>;
   /** Her own blocked set: the layout's blocked tiles, and every tile that is not in `walk`. */
   blocked: Set<string>;
@@ -690,7 +835,7 @@ export function protonArea(input: ProtonAreaInput): ProtonArea {
     }
   }
   const seats = new Set<string>();
-  for (const t of [...input.sofaSeats, ...input.loungeSeats]) {
+  for (const t of [...input.sofaSeats, ...input.loungeSeats, ...(input.boxes ?? [])]) {
     if (labelAt(t.col, t.row) === TOILETS || excluded(t.col, t.row)) continue;
     const beside = [
       [0, -1],
@@ -737,11 +882,198 @@ export const CAFE_SPOTS: readonly Tile[] = [
 ];
 export const ATRIUM_HEAD: readonly Tile[] = [25, 26, 27, 28].map((col) => ({ col, row: 2 }));
 
+// ── Her care corner ────────────────────────────────────────────────
+
+/**
+ * Where her things are in the open office (read from its layout, 54 by 36). The bowls stand in the café's west column, left of the
+ * fridge's spot (8,21), and she eats from the tile to their east facing left: the terrace's railings and plants already hold (6,21) and
+ * (6,22), the tiles agy first named. The litter box is the terrace's north-west corner, the furthest unblocked tile from the café, the
+ * pods, the toilets and the turnstile throat. The ball starts in the atrium, below the head of it.
+ */
+export const CARE = {
+  food: { col: 7, row: 21 },
+  water: { col: 7, row: 22 },
+  foodFrom: { col: 8, row: 21 },
+  waterFrom: { col: 8, row: 22 },
+  litter: { col: 2, row: 19 },
+  ball: { col: 26, row: 4 },
+} as const satisfies Record<string, Tile>;
+
+const CAFE = 'Café';
+const TERRACE = 'Terrace';
+
+export interface CareBowl {
+  kind: 'eat' | 'drink';
+  bowl: Tile;
+  /** The tile she stands on at the bowl, and the way she faces. */
+  from: Tile;
+  face: Direction;
+}
+
+export interface CarePlan {
+  bowls: CareBowl[];
+  litter: Tile | null;
+  ball: Tile | null;
+}
+
+export interface CarePlanInput {
+  cols: number;
+  rows: number;
+  areaTiles: ReadonlyArray<string | null> | undefined;
+  /** The layout's own blocked tiles, without the care set. */
+  blocked: ReadonlySet<string>;
+}
+
+const directionBetween = (from: Tile, to: Tile): Direction =>
+  to.col > from.col
+    ? Direction.RIGHT
+    : to.col < from.col
+      ? Direction.LEFT
+      : to.row > from.row
+        ? Direction.DOWN
+        : Direction.UP;
+
+/** The care set the layout has room for: a bowl needs its tile and hers free in the café, the box a free terrace tile, the ball a free labelled one. */
+export function carePlan(input: CarePlanInput): CarePlan {
+  const { cols, rows, areaTiles, blocked } = input;
+  const labelAt = (t: Tile): string | null =>
+    t.col < 0 || t.row < 0 || t.col >= cols || t.row >= rows
+      ? null
+      : (areaTiles?.[t.row * cols + t.col] ?? null);
+  const free = (t: Tile, label: string): boolean =>
+    labelAt(t) === label && !blocked.has(key(t.col, t.row));
+  const bowls: CareBowl[] = [];
+  for (const [kind, bowl, from] of [
+    ['eat', CARE.food, CARE.foodFrom],
+    ['drink', CARE.water, CARE.waterFrom],
+  ] as const) {
+    if (free(bowl, CAFE) && free(from, CAFE)) {
+      bowls.push({ kind, bowl, from, face: directionBetween(from, bowl) });
+    }
+  }
+  const ballLabel = labelAt(CARE.ball);
+  return {
+    bowls,
+    litter: free(CARE.litter, TERRACE) ? CARE.litter : null,
+    ball:
+      ballLabel !== null &&
+      ballLabel !== '' &&
+      ballLabel !== TOILETS &&
+      !blocked.has(key(CARE.ball.col, CARE.ball.row))
+        ? CARE.ball
+        : null,
+  };
+}
+
+/** Her things' colours: the bowls' rims and food and water, the litter tray and sand, and the red, white and yellow ball. */
+export const CARE_PALETTE: Readonly<Record<string, string>> = {
+  o: '#3f3740',
+  k: '#8a5a3c',
+  d: '#6b4128',
+  r: '#c8553d',
+  w: '#9fd3f2',
+  h: '#e6f6ff',
+  b: '#5b8fb9',
+  u: '#7d8a9c',
+  t: '#9aa7b8',
+  s: '#e6d5a8',
+  p: '#cdb985',
+  R: '#d9453d',
+  W: '#f4f4f4',
+  Y: '#f2c230',
+};
+
+/** The food bowl, the water bowl, the litter box and the ball: 16x16, drawn at the bottom of the tile like her. */
+export const CARE_GRIDS = {
+  food: [
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '....oooooooo....',
+    '...okdkkdkkdo...',
+    '..orrrrrrrrrro..',
+    '...orrrrrrrro...',
+    '....oooooooo....',
+    '................',
+  ],
+  water: [
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '....oooooooo....',
+    '...owhwwwwwwo...',
+    '..obbbbbbbbbbo..',
+    '...obbbbbbbbo...',
+    '....oooooooo....',
+    '................',
+  ],
+  litter: [
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '..oooooooooooo..',
+    '..ouuuuuuuuuuo..',
+    '..osspssspssso..',
+    '..otttttttttto..',
+    '..oooooooooooo..',
+    '................',
+  ],
+  ball: [
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '.......ooo......',
+    '......oRWRo.....',
+    '.....oRRWYRo....',
+    '.....oWWRYYo....',
+    '......oRYRo.....',
+    '.......ooo......',
+    '................',
+  ],
+} satisfies Record<string, readonly string[]>;
+
+/** Decoded once at load, so the sprite cache keeps them. */
+export const CARE_SPRITES = {
+  food: gridToSprite({ map: CARE_GRIDS.food, palette: CARE_PALETTE } satisfies AeroSpriteGrid),
+  water: gridToSprite({ map: CARE_GRIDS.water, palette: CARE_PALETTE } satisfies AeroSpriteGrid),
+  litter: gridToSprite({ map: CARE_GRIDS.litter, palette: CARE_PALETTE } satisfies AeroSpriteGrid),
+  ball: gridToSprite({ map: CARE_GRIDS.ball, palette: CARE_PALETTE } satisfies AeroSpriteGrid),
+} as const;
+
 // ── Her day ────────────────────────────────────────────────────────
 
 export interface ProtonSpot extends Tile {
   /** The nap seat's uid, for a sofa. */
   seat?: string;
+  /** The way she faces on arriving: at a bowl, the bowl; by the ball, the ball. */
+  face?: Direction;
 }
 
 /** What the office tells her each time she decides. */
@@ -755,6 +1087,9 @@ export interface ProtonWorld {
   walk: ReadonlySet<string>;
   /** The spots of a kind that are free now. */
   spots(kind: SpotKind): ProtonSpot[];
+  /** The ball's tile, or null when there is none, and the way to move it (to a tile of `walk`). */
+  ball: Tile | null;
+  setBall(tile: Tile): void;
 }
 
 export class Proton {
@@ -778,6 +1113,11 @@ export class Proton {
   private phases: Phase[] = [];
   /** Pre-empted on the way: decide again on arriving at the tile she was stepping to. */
   private rushed = false;
+  /** The phase running, the way she faces on arriving, the way the ball lies from her, and whether she is chasing it. */
+  private cur: Phase | null = null;
+  private arriveDir: Direction | null = null;
+  private playDir: Direction | null = null;
+  private chasing = false;
 
   constructor(tile: Tile) {
     this.col = tile.col;
@@ -802,6 +1142,9 @@ export class Proton {
     this.spot = null;
     this.phases = [];
     this.timer = 0;
+    this.cur = null;
+    this.chasing = false;
+    this.playDir = null;
     if (settle && this.path.length > 0 && this.progress > 0) {
       this.path = [this.path[0]];
       this.rushed = true;
@@ -835,13 +1178,51 @@ export class Proton {
     }
     this.timer -= dt;
     if (this.timer > 0) return;
+    const done = this.cur;
+    this.cur = null;
+    if (done?.after === 'chase' && this.chase(w)) return;
     const next = this.phases.shift();
     if (next) {
-      this.timer = next.secs;
-      this.setMode(next.mode);
+      this.begin(next);
       return;
     }
     this.pick(w);
+  }
+
+  private begin(phase: Phase): void {
+    this.timer = phase.secs;
+    this.cur = phase;
+    this.setMode(phase.mode);
+  }
+
+  /**
+   * Bats the ball one or two tiles straight away from her (only over tiles she walks on) and goes after it, to stand beside it again. False
+   * when the ball is not beside her or has no room to roll.
+   */
+  private chase(w: ProtonWorld): boolean {
+    const d = this.playDir;
+    const ball = w.ball;
+    if (d === null || ball === null) return false;
+    const dc = d === Direction.RIGHT ? 1 : d === Direction.LEFT ? -1 : 0;
+    const dr = d === Direction.DOWN ? 1 : d === Direction.UP ? -1 : 0;
+    if (ball.col !== this.col + dc || ball.row !== this.row + dr) return false;
+    const want = 1 + Math.floor(w.rng() * 2);
+    let n = 0;
+    while (n < want && w.walk.has(key(ball.col + dc * (n + 1), ball.row + dr * (n + 1)))) n++;
+    if (n === 0) return false;
+    w.setBall({ col: ball.col + dc * n, row: ball.row + dr * n });
+    this.path = Array.from({ length: n }, (_, i) => ({
+      col: ball.col + dc * i,
+      row: ball.row + dr * i,
+    }));
+    this.progress = 0;
+    this.chasing = true;
+    this.face(this.path[0]);
+    this.setMode('chase');
+    // The chase is part of the stay: what she walks is taken off the time she sits at the end, so the stay is the plan's.
+    const last = this.phases[this.phases.length - 1];
+    if (last) last.secs = Math.max(0.1, last.secs - (n * TILE_SIZE) / PET_WALK_SPEED_PX_PER_SEC);
+    return true;
   }
 
   private walk(dt: number, w: ProtonWorld): void {
@@ -882,18 +1263,25 @@ export class Proton {
       this.setMode('sit');
       return;
     }
+    if (this.chasing) {
+      // The chase is over: she stands beside the ball and goes on with the rest of her stay.
+      this.chasing = false;
+      this.timer = 0;
+      this.setMode('sit');
+      return;
+    }
     const kind = this.spot;
-    this.dir = kind === 'cafe' ? Direction.UP : Direction.DOWN;
+    this.dir = this.arriveDir ?? (kind === 'cafe' ? Direction.UP : Direction.DOWN);
+    this.playDir = kind === 'ball' ? this.arriveDir : null;
     if (kind === null) {
       this.phases = [];
       this.timer = WANDER_MIN_SEC + w.rng() * (WANDER_MAX_SEC - WANDER_MIN_SEC);
       this.setMode('sit');
       return;
     }
-    this.phases = planFor(kind, stayFor(kind, w.rng));
-    const first = this.phases.shift()!;
-    this.timer = first.secs;
-    this.setMode(first.mode);
+    const stay = stayFor(kind, w.rng);
+    this.phases = planFor(kind, stay, kind === 'ball' ? 1 + Math.floor(w.rng() * 2) : 1);
+    this.begin(this.phases.shift()!);
   }
 
   /** Chooses the next spot and starts walking; a wander or a wait when nothing can be reached. */
@@ -937,6 +1325,7 @@ export class Proton {
     this.progress = 0;
     this.spot = kind;
     this.seat = spot.seat ?? null;
+    this.arriveDir = spot.face ?? null;
     this.face(path[0]);
     this.setMode('walk');
     return true;
