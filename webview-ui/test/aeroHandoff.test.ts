@@ -1175,15 +1175,153 @@ test('the amber dot is drawn on each pinned capsule, pulses on the office clock,
     for (const a of amberDots(os)) seen.add(Math.round(a * 100));
   }
   assert.ok(seen.size > 3, `the alpha moves with the clock (${[...seen]})`);
-  const g = globalThis as unknown as { window?: unknown };
-  const before = g.window;
-  g.window = { matchMedia: () => ({ matches: true }) };
+  const g = globalThis as unknown as { matchMedia?: unknown };
+  const before = g.matchMedia;
+  g.matchMedia = () => ({ matches: true });
   try {
     for (let i = 0; i < 6; i++) {
       run(os, 0.2);
       assert.deepEqual(amberDots(os), [1, 1], 'steady');
     }
   } finally {
-    g.window = before;
+    g.matchMedia = before;
   }
+});
+
+// ── The gate shuts on a handoff that already has a walk (fix round) ──
+
+test('the book: a gate that shuts on a handoff queued or waiting drops its walk and pins it; a clear then lifts it once', () => {
+  const book = new HandoffBook();
+  book.ingest(FLOOR, []);
+  book.ingest(FLOOR, [item(3, RA, RB)]);
+  assert.equal(book.queue.length, 1);
+  book.ingest(FLOOR, [gatedItem(3, RA, RB)]);
+  assert.equal(book.queue.length, 0, 'the plain walk is dropped');
+  assert.equal(book.gate.get(3), 'pinned');
+  assert.equal(book.waitingCount, 0);
+  book.ingest(FLOOR, [item(3, RA, RB)]);
+  assert.deepEqual(
+    book.queue.map((q) => [q.seq, q.route]),
+    [[3, 'board']],
+    'one lift, no second plain walk',
+  );
+  // One nobody could carry (waiting) is dropped the same way.
+  const nobody = () => false;
+  book.ingest(FLOOR, [item(3, RA, RB), item(4, RA, RB)], nobody);
+  assert.equal(book.waiting.length, 1);
+  book.ingest(FLOOR, [item(3, RA, RB), gatedItem(4, RA, RB)], nobody);
+  assert.equal(book.waiting.length, 0);
+  assert.equal(book.gate.get(4), 'pinned');
+  // A lift whose gate shuts again goes back to the board, and its walk is stale.
+  const lift = book.queue.find((q) => q.seq === 3)!;
+  assert.equal(book.walkIsStale(lift), false);
+  book.ingest(FLOOR, [gatedItem(3, RA, RB), gatedItem(4, RA, RB)]);
+  assert.equal(book.gate.get(3), 'pinned');
+  assert.equal(book.queue.length, 0);
+  assert.equal(book.walkIsStale(lift), true);
+});
+
+test('the book: a parked pin is dropped when its gate clears, a pin nobody can walk pops, and only a waiting pin is pinned by a walker', () => {
+  const book = new HandoffBook();
+  book.ingest(FLOOR, []);
+  book.ingest(FLOOR, [gatedItem(3, RA, RB)]);
+  const pin = book.queue[0];
+  book.park(pin);
+  assert.equal(book.waiting.length, 1);
+  book.ingest(FLOOR, [item(3, RA, RB)]);
+  assert.deepEqual(
+    [...book.queue, ...book.waiting].map((q) => [q.seq, q.route]),
+    [[3, undefined]],
+    'only the ordinary walk is left, so nothing is delivered twice',
+  );
+  // A walker's pin is ignored unless the handoff is waiting to be pinned.
+  book.pinned(pin, 1, BOARD_FRONT);
+  assert.deepEqual(book.pins, []);
+  assert.equal(book.gate.has(3), false);
+  book.ingest(FLOOR, [item(3, RA, RB), gatedItem(5, RA, RB)]);
+  const walked = book.queue.find((q) => q.seq === 5)!;
+  book.pinned(walked, 1, BOARD_FRONT);
+  assert.deepEqual(book.pins, [{ seq: 5, id: 1, ...BOARD_FRONT }]);
+  // A pin that can't be walked is popped onto the board.
+  book.ingest(FLOOR, [item(3, RA, RB), item(5, RA, RB), gatedItem(6, RA, RB)]);
+  const six = book.queue.find((q) => q.seq === 6)!;
+  book.popPin(six);
+  assert.equal(book.gate.get(6), 'pinned');
+  assert.equal(
+    book.queue.some((q) => q.seq === 6),
+    false,
+  );
+  assert.deepEqual(
+    book.takePops().map((p) => [p.item.seq, p.kind]),
+    [[6, 'pin']],
+  );
+});
+
+test('the book: a pin or a lift whose route went stale is not queued again after its walk is dropped; a given-up lift lands on the desk', () => {
+  const book = new HandoffBook();
+  book.ingest(FLOOR, []);
+  book.ingest(FLOOR, [gatedItem(3, RA, RB)]);
+  const pin = book.take(() => true)!;
+  book.ingest(FLOOR, [item(3, RA, RB)]);
+  assert.equal(book.queue.length, 1, 'the ordinary walk');
+  book.requeue(pin);
+  assert.equal(book.queue.length, 1, 'the stale pin is not queued again');
+  assert.equal(book.queue[0].route, undefined);
+  // A lift whose gate shut again.
+  const book2 = new HandoffBook();
+  book2.ingest(FLOOR, [gatedItem(4, RA, RB)]);
+  book2.ingest(FLOOR, [item(4, RA, RB)]);
+  const lift = book2.take(() => true)!;
+  book2.ingest(FLOOR, [gatedItem(4, RA, RB)]);
+  book2.requeue(lift);
+  assert.equal(book2.queue.length, 0, 'the stale lift is not queued again');
+  assert.equal(book2.gate.get(4), 'pinned');
+  // A lift given up on after its tries are used up: the capsule goes to the receiver's desk.
+  const book3 = new HandoffBook();
+  book3.ingest(FLOOR, [gatedItem(5, RA, RB)]);
+  book3.ingest(FLOOR, [item(5, RA, RB)]);
+  const spent = { ...book3.take(() => true)!, tries: 2 };
+  book3.requeue(spent);
+  assert.equal(book3.gate.has(5), false);
+  assert.equal(book3.desk.get(5), RB);
+});
+
+test('a gate that shuts on a handoff being walked cancels the walk and pins it; the clear then delivers once', () => {
+  const c = office(2);
+  const { os } = c;
+  send([item(5, RA, RB)]);
+  waitFor(os, () => walking(os, 1), 5, 'the sender sets off with the ordinary walk');
+  send([gatedItem(5, RA, RB)]);
+  run(os, 0.3);
+  assert.equal(walking(os, 1), false, 'its walk is over');
+  assert.equal(onBoard(os).length, 1, 'pinned');
+  assert.equal(c.sounds.n, 0);
+  waitFor(os, () => atDesk(os, 1), 60, 'the sender is home');
+  run(os, 20);
+  assert.equal(delivered(os), 0);
+  send([item(5, RA, RB)]);
+  waitFor(os, () => delivered(os) === 1, 90, 'delivered by the receiver');
+  assert.equal(snap(os).handoffDeliveries[0].id, 2);
+  run(os, 30);
+  assert.equal(delivered(os), 1, 'once');
+  assert.equal(onBoard(os).length, 0);
+});
+
+test('a gate that shuts again while the receiver walks to lift it cancels the lift', () => {
+  const c = office(2);
+  const { os } = c;
+  send([gatedItem(5, RA, RB)], OTHER_FLOOR);
+  run(os, 1);
+  send([item(5, RA, RB)], OTHER_FLOOR);
+  waitFor(os, () => walking(os, 2), 5, 'the receiver sets off');
+  send([gatedItem(5, RA, RB)], OTHER_FLOOR);
+  run(os, 0.3);
+  assert.equal(walking(os, 2), false);
+  assert.equal(onBoard(os).length, 1);
+  run(os, 20);
+  assert.equal(delivered(os), 0);
+  send([item(5, RA, RB)], OTHER_FLOOR);
+  waitFor(os, () => delivered(os) === 1, 90, 'delivered after the clear');
+  run(os, 20);
+  assert.equal(delivered(os), 1);
 });

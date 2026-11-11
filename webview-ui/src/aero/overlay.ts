@@ -26,7 +26,7 @@ import { sittingOffsetPx } from '../office/engine/characters.js';
 import type { OfficeState } from '../office/engine/officeState.js';
 import type { Character } from '../office/types.js';
 import { TILE_SIZE } from '../office/types.js';
-import { drawEffects } from './effects.js';
+import { drawEffects, prefersReducedMotion } from './effects.js';
 import { fitCached } from './fit.js';
 import { drawFloorSign } from './floorSign.js';
 import { clockPlateRect, whiteboardRect } from './lounge.js';
@@ -190,15 +190,6 @@ function drawCapsule(
   );
 }
 
-/** Whether the system asks for less motion: the amber dot then stays lit instead of pulsing. */
-function reducedMotion(): boolean {
-  return (
-    typeof window !== 'undefined' &&
-    typeof window.matchMedia === 'function' &&
-    window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  );
-}
-
 /** A gated handoff's capsule pinned to the whiteboard, with a pulsing amber dot on its corner (drawn only: it takes no click). */
 function drawBoardCapsule(
   ctx: CanvasRenderingContext2D,
@@ -296,7 +287,7 @@ export function drawAeroOverlay(
   drawWall(ctx, os, offsetX, offsetY, zoom);
   drawFloorSign(ctx, os, offsetX, offsetY, zoom);
   // Gated handoffs: their capsules on the whiteboard, each with a pulsing amber dot (steady under Reduced Motion).
-  const pulse = reducedMotion() ? 1 : os.aero.boardPulse();
+  const pulse = prefersReducedMotion() ? 1 : os.aero.boardPulse();
   for (const c of os.aero.boardCapsules())
     drawBoardCapsule(ctx, c.x, c.y, pulse, offsetX, offsetY, zoom);
 

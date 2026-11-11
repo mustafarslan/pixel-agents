@@ -1599,7 +1599,7 @@ export class AeroOffice {
         );
         this.tubeSound();
       }
-      this.handoffs.pinned(item, -1, board);
+      this.handoffs.pinned(item, -1, board, true);
     }
   }
 
@@ -1629,12 +1629,9 @@ export class AeroOffice {
         for (const [id, route] of [...this.routes]) {
           const hand = route.hand;
           if (!hand) continue;
-          // A pin walk whose gate cleared (or whose seq left) is over: the handoff is an ordinary one now.
-          const ungated =
-            hand.item.route === 'pin' &&
-            !hand.done &&
-            this.handoffs.gate.get(hand.item.seq) !== 'walking';
-          if (reset || !this.handoffs.isListed(hand.item.seq) || ungated)
+          // A walk that no longer fits its gate (a pin whose gate cleared, a lift or a plain walk of a handoff gated now) is over.
+          const stale = !hand.done && this.handoffs.walkIsStale(hand.item);
+          if (reset || !this.handoffs.isListed(hand.item.seq) || stale)
             this.cancelHandoff(id, route);
         }
         for (const item of overflow) this.placeHandoff(item);
@@ -1730,7 +1727,11 @@ export class AeroOffice {
         route: item.route,
       });
       if (plan === null) {
-        this.handoffs.park(item);
+        // A pin nobody can walk is popped onto the board and a lift with no receiver at the tube, so they show; the rest wait.
+        if (item.route === 'pin') this.handoffs.popPin(item);
+        else if (item.route === 'board') this.handoffs.popLift(item);
+        else this.handoffs.park(item);
+        this.popGated();
         continue;
       }
       if ((plan.walker === 'sender' ? sender : receiver)?.id !== ch.id) continue;
@@ -4013,6 +4014,9 @@ export class AeroOffice {
             whiteboard: this.lounge.whiteboard
               ? { col: this.lounge.whiteboard.col, row: this.lounge.whiteboard.row }
               : null,
+            whiteboardSize: this.lounge.whiteboard
+              ? { w: this.lounge.whiteboard.w, h: this.lounge.whiteboard.h }
+              : null,
             clock: this.lounge.clock
               ? { col: this.lounge.clock.col, row: this.lounge.clock.row }
               : null,
@@ -4169,6 +4173,8 @@ export interface AeroSnapshot {
     seats: string[];
     table: Tile[];
     whiteboard: { col: number; row: number } | null;
+    /** The whiteboard's footprint in tiles (its front tile is under it), or null. */
+    whiteboardSize: { w: number; h: number } | null;
     clock: { col: number; row: number } | null;
   } | null;
   routes: Array<{

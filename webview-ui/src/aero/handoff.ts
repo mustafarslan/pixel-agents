@@ -258,16 +258,17 @@ export class HandoffBook {
       const state = this.gate.get(h.seq);
       if (this.seen.has(id)) {
         if (h.gated === true) {
-          // A gate that shut on a handoff already seen: its capsule goes to the board with no walk.
-          if (state === undefined) {
+          if (state === undefined || state === 'lifting') {
+            // A gate that shut on a handoff already seen (or shut again while it was being lifted): whatever was to carry it to a desk is
+            // dropped (queued, waiting, or a walk the office cancels by `walkIsStale`), and its capsule goes to the board with no walk.
+            this.dropWalks(h.seq);
             this.desk.delete(h.seq);
             this.gate.set(h.seq, 'pinned');
           }
         } else if (state === 'walking') {
           // The gate cleared before the sender pinned it: an ordinary handoff from here.
           this.gate.delete(h.seq);
-          this.queue = this.queue.filter((q) => q.seq !== h.seq);
-          this.pending.delete(h.seq);
+          this.dropWalks(h.seq);
           this.enqueue(h, plannable, overflow);
         } else if (state === 'pinned') {
           this.lift(h, plannable);
@@ -338,6 +339,40 @@ export class HandoffBook {
     this.queue.push({ ...h, tries: 0, route: 'board' });
   }
 
+  /** Forgets every queued or waiting walk of a seq (and that it was on its way): its route changed. */
+  private dropWalks(seq: number): void {
+    this.queue = this.queue.filter((q) => q.seq !== seq);
+    this.waiting = this.waiting.filter((q) => q.seq !== seq);
+    this.pending.delete(seq);
+  }
+
+  /**
+   * Whether a walk that is under way no longer fits the handoff's gate state (the office cancels it): a pin walk whose gate cleared, a
+   * lift whose gate shut again, or an ordinary walk of a handoff that is gated now.
+   */
+  walkIsStale(item: QueuedHandoff): boolean {
+    const state = this.gate.get(item.seq);
+    if (item.route === 'pin') return state !== 'walking';
+    if (item.route === 'board') return state === 'pinned' || state === 'walking';
+    return state !== undefined;
+  }
+
+  /** A pin that can't be walked (no sender, no way to the board) is popped at the tube onto the board instead, so it shows. */
+  popPin(item: AeroHandoff): void {
+    this.dropWalks(item.seq);
+    if (!this.listed.has(item.seq)) return;
+    this.gate.set(item.seq, 'pinned');
+    this.pops.push({ item, kind: 'pin' });
+  }
+
+  /** A lift that can't be walked (the receiver is gone): popped at the tube, and the board is cleared. */
+  popLift(item: AeroHandoff): void {
+    this.dropWalks(item.seq);
+    if (!this.listed.has(item.seq)) return;
+    this.gate.delete(item.seq);
+    this.pops.push({ item, kind: 'lift' });
+  }
+
   /** The capsules to pop at the tube since the last call (the office does it, with its effect and sound). */
   takePops(): Array<{ item: AeroHandoff; kind: 'pin' | 'lift' }> {
     const out = this.pops;
@@ -354,7 +389,9 @@ export class HandoffBook {
   }
 
   /** A capsule pinned to the board (only while the handoff is still listed): `by` is the walker, or -1 for one the tube popped. */
-  pinned(item: AeroHandoff, by: number, at: Tile): void {
+  pinned(item: AeroHandoff, by: number, at: Tile, popped = false): void {
+    // A walker's pin counts only while its handoff is still waiting to be pinned; a pop was pinned by `pin`/`popPin` already.
+    if (!popped && this.gate.get(item.seq) !== 'walking') return;
     this.pending.delete(item.seq);
     if (!this.listed.has(item.seq)) return;
     this.gate.set(item.seq, 'pinned');
@@ -404,7 +441,11 @@ export class HandoffBook {
     if (forgotten || stale) {
       this.pending.delete(item.seq);
       if (!stale && item.route === 'pin' && state === 'walking') this.gate.set(item.seq, 'pinned');
-      if (!stale && item.route === 'board' && state === 'lifting') this.gate.delete(item.seq);
+      if (!stale && item.route === 'board' && state === 'lifting') {
+        // Given up on: the capsule goes to the receiver's desk (placed only while it is still listed).
+        this.gate.delete(item.seq);
+        this.place(item);
+      }
       return;
     }
     this.queue.unshift({ ...item, tries: item.tries + 1 });
