@@ -62,6 +62,7 @@ import {
 import { assignFirstNames, lookKey, pickLook, roleFromSlug } from './names.js';
 import {
   ATRIUM_HEAD,
+  ballSpotDirs,
   CAFE_SPOTS,
   CARE_SPRITES,
   type CarePlan,
@@ -73,6 +74,7 @@ import {
   type ProtonSpot,
   protonSpriteOf,
   type ProtonWorld,
+  SPOT_KINDS,
   type SpotKind,
 } from './proton.js';
 import {
@@ -720,7 +722,11 @@ export class AeroOffice {
       this.careIn === os.blockedTiles
         ? new Set([...os.blockedTiles].filter((k) => !this.careKeys.has(k)))
         : os.blockedTiles;
-    this.care = carePlan({ cols, rows, areaTiles, blocked: own });
+    // Only the open office has a care corner (it has turnstiles): a Rooms layout with a room named Café gets no invisible blocked tiles.
+    this.care =
+      turnstiles.length > 0
+        ? carePlan({ cols, rows, areaTiles, blocked: own })
+        : { bowls: [], litter: null, ball: null };
     this.careKeys = new Set(
       [...this.care.bowls.map((b) => b.bowl), ...(this.care.litter ? [this.care.litter] : [])].map(
         (t) => key(t.col, t.row),
@@ -882,22 +888,21 @@ export class AeroOffice {
       }
       case 'ball': {
         // Beside the ball with the ball straight ahead and room beyond it to roll: she bats it away from her.
-        const ball = this.ball;
-        if (ball === null) return [];
+        let ball = this.ball;
+        if (ball === null || this.area === null) return [];
+        let dirs = ballSpotDirs(this.area.walk, ball);
+        // A ball nobody can bat from anywhere (a corner or a dead end) goes back to its start.
+        const start = this.care.ball;
+        if (dirs.length === 0 && start !== null) {
+          ball = this.ball = { col: start.col, row: start.row };
+          dirs = ballSpotDirs(this.area.walk, ball);
+        }
         const taken = this.occupied(Number.NaN);
         const out: ProtonSpot[] = [];
-        for (const [dc, dr, face] of [
-          [0, 1, Direction.DOWN],
-          [0, -1, Direction.UP],
-          [1, 0, Direction.RIGHT],
-          [-1, 0, Direction.LEFT],
-        ] as const) {
-          const from = key(ball.col - dc, ball.row - dr);
-          if (
-            this.area?.walk.has(from) &&
-            this.area.walk.has(key(ball.col + dc, ball.row + dr)) &&
-            !taken.has(from)
-          ) {
+        for (const face of dirs) {
+          const dc = face === Direction.RIGHT ? 1 : face === Direction.LEFT ? -1 : 0;
+          const dr = face === Direction.DOWN ? 1 : face === Direction.UP ? -1 : 0;
+          if (!taken.has(key(ball.col - dc, ball.row - dr))) {
             out.push({ col: ball.col - dc, row: ball.row - dr, face });
           }
         }
@@ -958,7 +963,19 @@ export class AeroOffice {
       const at = cat.spotTile();
       if (this.occupied(Number.NaN).has(key(at.col, at.row))) cat.giveUp();
     }
-    cat.update(dt, this.protonWorld(update));
+    const world = this.protonWorld(update);
+    if (this.visiting !== null && cat.visit(this.visiting, world)) this.visiting = null;
+    cat.update(dt, world);
+  }
+
+  /** The kind a test asked her to go to next (`protonVisit`), until she has a free spot of it. */
+  private visiting: SpotKind | null = null;
+
+  /** Test hook (e2e only): she gives up what she is doing and goes to a spot of `kind` as soon as one is free. False for a kind that doesn't exist. */
+  protonVisit(kind: string): boolean {
+    if (!(SPOT_KINDS as readonly string[]).includes(kind)) return false;
+    this.visiting = kind as SpotKind;
+    return true;
   }
 
   /** What the renderer draws for her, or null when she is not on show. */

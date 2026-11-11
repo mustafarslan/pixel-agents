@@ -17,6 +17,7 @@ import { drawAeroOverlay } from '../src/aero/overlay.js';
 import {
   CARE,
   CARE_GRIDS,
+  ballSpotDirs,
   CARE_PALETTE,
   carePlan,
   pickKind,
@@ -957,7 +958,7 @@ const adjacent = (a: { col: number; row: number }, b: { col: number; row: number
 
 test('carePlan: the bowls left of the café spot, the litter box in the terrace’s north-west corner, the ball in the atrium', () => {
   assert.deepEqual(CARE.food, { col: 7, row: 21 });
-  assert.deepEqual(CARE.water, { col: 7, row: 22 });
+  assert.deepEqual(CARE.water, { col: 7, row: 25 });
   assert.deepEqual(CARE.litter, { col: 2, row: 19 });
   assert.deepEqual(CARE.ball, { col: 26, row: 4 });
   const os = office(seeded(1));
@@ -972,7 +973,7 @@ test('carePlan: the bowls left of the café spot, the litter box in the terrace�
     plan.bowls.map((b) => [b.kind, tileKey(b.bowl), tileKey(b.from), b.face]),
     [
       ['eat', '7,21', '8,21', Direction.LEFT],
-      ['drink', '7,22', '8,22', Direction.LEFT],
+      ['drink', '7,25', '8,25', Direction.LEFT],
     ],
   );
   assert.deepEqual(plan.litter, CARE.litter);
@@ -984,7 +985,7 @@ test('carePlan: the bowls left of the café spot, the litter box in the terrace�
     ['drink'],
   );
   assert.deepEqual(
-    carePlan({ ...input, blocked: new Set(['8,22']) }).bowls.map((b) => b.kind),
+    carePlan({ ...input, blocked: new Set(['8,25']) }).bowls.map((b) => b.kind),
     ['eat'],
   );
   assert.equal(carePlan({ ...input, blocked: new Set(['2,19']) }).litter, null);
@@ -1013,14 +1014,23 @@ test('the bowls and the litter box block people and are not walk tiles; the ball
   const allowed = os.aero.protonAllowed();
   assert.ok(!allowed.has(tileKey(CARE.food)) && !allowed.has(tileKey(CARE.water)));
   assert.ok(allowed.has(tileKey(CARE.litter)), 'the box is a target');
-  assert.ok(allowed.has(tileKey(CARE.ball)) && allowed.has('8,21') && allowed.has('8,22'));
+  assert.ok(allowed.has(tileKey(CARE.ball)) && allowed.has('8,21') && allowed.has('8,25'));
   // A second refresh of the same layout adds nothing and loses nothing; a rebuilt layout is blocked again.
-  os.aero.snapshot();
-  assert.ok(os.blockedTiles.has('7,21') && os.aero.snapshot().care.food !== null);
+  const blockedBefore = new Set(os.blockedTiles);
+  const walkableBefore = os.walkableTiles.length;
+  os.seats = new Map(os.seats); // new seats: the next snapshot runs the refresh again on the same layout and blocked set
+  assert.ok(os.aero.snapshot().care.food !== null);
+  assert.deepEqual(
+    [...os.blockedTiles].sort(),
+    [...blockedBefore].sort(),
+    'a refresh adds and loses nothing',
+  );
+  assert.equal(os.walkableTiles.length, walkableBefore);
+  assert.ok(os.aero.snapshot().care.litter !== null && os.blockedTiles.has('2,19'));
   os.rebuildFromLayout(os.getLayout());
   os.update(0.1);
   assert.ok(
-    os.blockedTiles.has('7,21') && os.blockedTiles.has('7,22') && os.blockedTiles.has('2,19'),
+    os.blockedTiles.has('7,21') && os.blockedTiles.has('7,25') && os.blockedTiles.has('2,19'),
   );
   // People never step on them, over minutes of work and wandering.
   const busy = office(seeded(6));
@@ -1126,7 +1136,7 @@ function careWatch(os: OfficeState, seconds: number, onTick: (t: number) => void
   }
 }
 
-test('every care stay happens on its own tile: eat at 8,21, drink at 8,22, the litter box at 2,19, the ball beside the ball', () => {
+test('every care stay happens on its own tile: eat at 8,21, drink at 8,25, the litter box at 2,19, the ball beside the ball', () => {
   const seen = new Map<string, number>();
   for (const seed of [81, 82, 83, 84, 85, 86]) {
     for (const lunch of [false, true]) {
@@ -1152,7 +1162,7 @@ test('every care stay happens on its own tile: eat at 8,21, drink at 8,22, the l
           assert.equal(here, '8,21');
           assert.ok(['eat'].includes(p.mode), `eat mode ${p.mode}`);
         } else if (kind === 'drink') {
-          assert.equal(here, '8,22');
+          assert.equal(here, '8,25');
           assert.ok(['drink'].includes(p.mode), `drink mode ${p.mode}`);
         } else if (kind === 'litter') {
           assert.equal(here, '2,19');
@@ -1221,7 +1231,7 @@ test('a layout refresh that leaves her walk area puts the ball back at its start
   assert.deepEqual(os.aero.snapshot().care.ball, CARE.ball, 'back at the start');
 });
 
-test('with no café or terrace the care set is just what fits: no bowls, no box, and she still wanders', () => {
+test('with no terrace the box is left out; the bowls and the ball stay, and she still wanders', () => {
   const os = buildWorld();
   const labels = os.layout.areaTiles as Array<string | null>;
   for (let r = 18; r <= 25; r++) for (let c = 1; c <= 6; c++) labels[r * COLS + c] = null;
@@ -1232,7 +1242,75 @@ test('with no café or terrace the care set is just what fits: no bowls, no box,
   run(os, 30);
   const care = os.aero.snapshot().care;
   assert.equal(care.litter, null);
+  assert.ok(!os.blockedTiles.has('2,19'), 'no invisible block where the box would be');
   assert.deepEqual(care.food, CARE.food);
+  assert.deepEqual(care.water, CARE.water);
+  assert.deepEqual(care.ball, CARE.ball);
   assert.equal(os.aero.protonSprites().length, 4, 'her, two bowls and the ball');
   assert.ok(cat(os)!.moves > 0);
+});
+
+test('a ball never lands where she cannot bat it again, and one stuck in a dead end goes back to its start', () => {
+  // The walk set of a corridor: batting along it from either side is fine, but a bat that would end on its last tile is cut short.
+  const walk = new Set(['0,0', '1,0', '2,0', '3,0', '4,0']);
+  assert.deepEqual(ballSpotDirs(walk, { col: 2, row: 0 }), [Direction.RIGHT, Direction.LEFT]);
+  assert.deepEqual(ballSpotDirs(walk, { col: 4, row: 0 }), [], 'the end of the corridor');
+  assert.deepEqual(ballSpotDirs(walk, { col: 0, row: 0 }), []);
+  assert.deepEqual(ballSpotDirs(walk, { col: 2, row: 1 }), [], 'not on a walk tile line');
+  // Over a long run the ball is only ever on a tile somebody can bat it from.
+  const os = office(seeded(97));
+  const area = (os.aero as unknown as { area: { walk: Set<string> } }).area;
+  let plays = 0;
+  careWatch(os, 900, () => {
+    const ball = os.aero.snapshot().care.ball!;
+    assert.ok(ballSpotDirs(area.walk, ball).length > 0, `ball stuck at ${tileKey(ball)}`);
+    if (os.aero.proton!.mode === 'bat') plays++;
+  });
+  assert.ok(plays > 0, 'she played');
+  // The backstop: a ball put in a corner of the terrace has no spot, so it is back at its start and she plays with it again.
+  const stuck = office(seeded(98));
+  const inner = stuck.aero as unknown as { ball: { col: number; row: number } | null };
+  const corner = { col: 1, row: 25 };
+  assert.deepEqual(ballSpotDirs(new Set(stuck.aero.protonAllowed()), corner), [], 'a corner');
+  inner.ball = corner;
+  let back = false;
+  let batted = 0;
+  careWatch(stuck, 400, () => {
+    if (tileKey(stuck.aero.snapshot().care.ball!) === tileKey(CARE.ball)) back = true;
+    if (stuck.aero.proton!.mode === 'bat') batted++;
+  });
+  assert.ok(back, 'the stuck ball went back to its start');
+  assert.ok(batted > 0, 'and she plays with it');
+});
+
+test('protonVisit sends her at once to a kind of spot, and refuses a kind that does not exist', () => {
+  assert.equal(office(seeded(99)).aero.protonVisit('nope'), false);
+  const expected: Record<string, string> = { eat: '8,21', drink: '8,25', litter: '2,19' };
+  for (const kind of ['eat', 'drink', 'litter', 'ball']) {
+    const os = office(seeded(100));
+    assert.equal(os.aero.protonVisit(kind), true);
+    let seen = false;
+    careWatch(os, 120, () => {
+      const p = os.aero.proton!;
+      if (p.spot !== kind || p.mode === 'walk' || p.mode === 'chase') return;
+      seen = true;
+      if (kind !== 'ball') assert.equal(key(p.col, p.row), expected[kind]);
+    });
+    assert.ok(seen, `she went to ${kind}`);
+  }
+});
+
+test('a Rooms layout (no turnstiles) with a room named Café or Terrace gets no care set and no invisible blocked tiles', () => {
+  const os = office(seeded(101));
+  const layout = os.getLayout();
+  const blockedBefore = os.blockedTiles.size;
+  os.rebuildFromLayout({
+    ...layout,
+    furniture: layout.furniture.filter((f) => f.type !== 'AERO_TURNSTILE'),
+  });
+  os.aero.snapshot();
+  const care = os.aero.snapshot().care;
+  assert.deepEqual([care.food, care.water, care.litter, care.ball], [null, null, null, null]);
+  for (const k of ['7,21', '7,25', '2,19']) assert.ok(!os.blockedTiles.has(k), `${k} is free`);
+  assert.ok(os.blockedTiles.size < blockedBefore);
 });

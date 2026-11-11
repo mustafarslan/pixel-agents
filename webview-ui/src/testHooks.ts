@@ -137,6 +137,8 @@ declare global {
       setAeroMeetings?: (on: boolean) => void;
       /** Empties the snapshot's latches (`worstWalkers`, `protonStray`, `protonTiles`): the start of a window the self-test checks. */
       resetAeroLatches?: () => void;
+      /** Proton gives up what she is doing and goes to a spot of this kind (`eat`, `drink`, `litter`, `ball`, ...) as soon as one is free: the self-test's way to see each stay without waiting on her draw. False for an unknown kind. */
+      protonVisit?: (kind: string) => boolean;
     };
   }
 }
@@ -193,6 +195,8 @@ export function installTestHooks(officeStateRef: { current: OfficeState | null }
   hooks.resetAeroLatches = () => {
     officeStateRef.current?.aero.resetLatches();
   };
+
+  hooks.protonVisit = (kind) => officeStateRef.current?.aero.protonVisit(kind) ?? false;
 
   hooks.setAeroMeetings = (on) => {
     officeStateRef.current?.aero.setMeetings(on === true);

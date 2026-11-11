@@ -885,16 +885,17 @@ export const ATRIUM_HEAD: readonly Tile[] = [25, 26, 27, 28].map((col) => ({ col
 // ── Her care corner ────────────────────────────────────────────────
 
 /**
- * Where her things are in the open office (read from its layout, 54 by 36). The bowls stand in the café's west column, left of the
- * fridge's spot (8,21), and she eats from the tile to their east facing left: the terrace's railings and plants already hold (6,21) and
- * (6,22), the tiles agy first named. The litter box is the terrace's north-west corner, the furthest unblocked tile from the café, the
+ * Where her things are in the open office (read from its layout, 54 by 36). The food bowl stands in the café's west column, left of the
+ * fridge's spot (8,21), and she eats from (8,21) facing left: the terrace's railings and plants already hold (6,21) and (6,22), the tiles
+ * agy first named. The water bowl is in the dead-end pocket (7,25) at the column's foot and she drinks from (8,25), a tile clear of the
+ * buffet counter (8..9, 22..23: its back row would put her under the sneeze guard). The litter box is the terrace's north-west corner, the furthest unblocked tile from the café, the
  * pods, the toilets and the turnstile throat. The ball starts in the atrium, below the head of it.
  */
 export const CARE = {
   food: { col: 7, row: 21 },
-  water: { col: 7, row: 22 },
+  water: { col: 7, row: 25 },
   foodFrom: { col: 8, row: 21 },
-  waterFrom: { col: 8, row: 22 },
+  waterFrom: { col: 8, row: 25 },
   litter: { col: 2, row: 19 },
   ball: { col: 26, row: 4 },
 } as const satisfies Record<string, Tile>;
@@ -922,6 +923,25 @@ export interface CarePlanInput {
   areaTiles: ReadonlyArray<string | null> | undefined;
   /** The layout's own blocked tiles, without the care set. */
   blocked: ReadonlySet<string>;
+}
+
+/** The ways she can stand to bat the ball at `ball`: from the tile behind it with a walk tile ahead of it to roll to. */
+export function ballSpotDirs(walk: ReadonlySet<string>, ball: Tile): Direction[] {
+  const out: Direction[] = [];
+  for (const [dc, dr, face] of [
+    [0, 1, Direction.DOWN],
+    [0, -1, Direction.UP],
+    [1, 0, Direction.RIGHT],
+    [-1, 0, Direction.LEFT],
+  ] as const) {
+    if (
+      walk.has(key(ball.col - dc, ball.row - dr)) &&
+      walk.has(key(ball.col + dc, ball.row + dr))
+    ) {
+      out.push(face);
+    }
+  }
+  return out;
 }
 
 const directionBetween = (from: Tile, to: Tile): Direction =>
@@ -1209,6 +1229,13 @@ export class Proton {
     const want = 1 + Math.floor(w.rng() * 2);
     let n = 0;
     while (n < want && w.walk.has(key(ball.col + dc * (n + 1), ball.row + dr * (n + 1)))) n++;
+    // It only lands where she can bat it again (a tile with a walk tile either side of it in a line): n tiles, else one fewer, else no bat.
+    while (
+      n > 0 &&
+      ballSpotDirs(w.walk, { col: ball.col + dc * n, row: ball.row + dr * n }).length === 0
+    ) {
+      n--;
+    }
     if (n === 0) return false;
     w.setBall({ col: ball.col + dc * n, row: ball.row + dr * n });
     this.path = Array.from({ length: n }, (_, i) => ({
@@ -1282,6 +1309,15 @@ export class Proton {
     const stay = stayFor(kind, w.rng);
     this.phases = planFor(kind, stay, kind === 'ball' ? 1 + Math.floor(w.rng() * 2) : 1);
     this.begin(this.phases.shift()!);
+  }
+
+  /** Test hook: gives up what she is doing and goes to a spot of `kind` at once; false (and nothing changes) when it has none free now. */
+  visit(kind: SpotKind, w: ProtonWorld): boolean {
+    const here = key(this.col, this.row);
+    const list = w.spots(kind).filter((s) => key(s.col, s.row) !== here);
+    if (list.length === 0) return false;
+    this.giveUp(false);
+    return this.go(list[Math.floor(w.rng() * list.length) % list.length], kind, w);
   }
 
   /** Chooses the next spot and starts walking; a wander or a wait when nothing can be reached. */
