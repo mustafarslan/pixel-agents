@@ -60,7 +60,7 @@ import {
   trackWorking,
   type Working,
 } from './meetings.js';
-import { assignFirstNames, lookKey, pickLook, roleFromSlug } from './names.js';
+import { lookKey, type NameBook, pickLook, resolveFirstNames, roleFromSlug } from './names.js';
 import {
   ATRIUM_HEAD,
   ballSpotDirs,
@@ -3936,7 +3936,7 @@ export class AeroOffice {
   }
 
   /** The first name each character was given (by id), kept until it leaves: names are made once, not remade as the set changes. */
-  private nameBook = new Map<number, { first: string; parity: number }>();
+  private nameBook: NameBook = new Map();
   private labelCache: {
     stamp: [number, number, number, number, AeroUpdate | null, number];
     labels: NameLabel[];
@@ -3955,8 +3955,9 @@ export class AeroOffice {
    * stock subagent likewise by its parent's; one whose parent is not on show has its own id in the key. Nothing from a transcript
    * (`agentName`, a subagent's type) is used.
    *
-   * A first name is given once (`assignFirstNames`, from the salted key, never one in use on show) and kept by character id until
-   * the character leaves, whatever the keys and the others do; it is made again only when its palette's parity changes. The result
+   * A first name (`resolveFirstNames`, from the salted key, never one in use on show) is kept by character id until the character
+   * leaves, whatever the others do, and made again only when its palette's parity changes; a person's, a contractor's and the front
+   * desk's are made over all of them at once, so they don't depend on the order they arrived in. The result
    * is kept until something that can change it does (a tick, the characters or people counted, the update, the off-floor set), so
    * a frame and a tool overlay render ask once; `force` always rebuilds (the snapshot).
    */
@@ -4053,19 +4054,15 @@ export class AeroOffice {
     for (const n of this.npcs) alive.add(n.ch.id);
     for (const id of this.os.characters.keys()) alive.add(id);
     for (const id of this.nameBook.keys()) if (!alive.has(id)) this.nameBook.delete(id);
-    const fresh: Entry[] = [];
-    const inUse = new Set<string>();
-    for (const e of entries) {
-      const kept = this.nameBook.get(e.id);
-      if (kept && kept.parity === e.palette % 2) inUse.add(kept.first);
-      else fresh.push(e);
-    }
-    if (fresh.length > 0) {
-      const firsts = assignFirstNames(fresh, inUse);
-      for (const e of fresh) {
-        this.nameBook.set(e.id, { first: firsts.get(e.key) ?? '', parity: e.palette % 2 });
-      }
-    }
+    resolveFirstNames(
+      entries.map((e) => ({
+        id: e.id,
+        key: e.key,
+        palette: e.palette,
+        stable: e.kind === 'person' || e.kind === 'contractor' || e.kind === 'desk',
+      })),
+      this.nameBook,
+    );
     const labels = entries.map((e) => ({ ...e, first: this.nameBook.get(e.id)?.first ?? '' }));
     this.labelCache = { stamp, labels, byId: new Map(labels.map((l) => [l.id, l] as const)) };
     return labels;

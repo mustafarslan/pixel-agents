@@ -203,6 +203,42 @@ export function assignFirstNames(
   return out;
 }
 
+/** What `resolveFirstNames` keeps for a character: its name and the parity of the palette it was made for. */
+export type NameBook = Map<number, { first: string; parity: number }>;
+
+/**
+ * Gives every entry its first name, in `book`. An entry with a `stable` key (a person, a contractor, a front-desk role: a key made of
+ * what the page is told, not of arrival) takes its name from `assignFirstNames` over all the stable entries on show at once, so two keys
+ * that want the same name settle it by key order whenever they arrive, and the same set of keys is given the same names after a reload.
+ * Any other entry keeps the name it was given while its palette's parity holds and the name isn't a stable one's; the rest are given
+ * names not in use. A name is never shown twice, as before.
+ */
+export function resolveFirstNames(
+  entries: ReadonlyArray<{ id: number; key: string; palette: number; stable: boolean }>,
+  book: NameBook,
+): void {
+  const fixed = assignFirstNames(entries.filter((e) => e.stable));
+  const inUse = new Set<string>();
+  for (const e of entries) {
+    if (!e.stable) continue;
+    const first = fixed.get(e.key) ?? '';
+    book.set(e.id, { first, parity: e.palette % 2 });
+    inUse.add(first);
+  }
+  const fresh: Array<{ id: number; key: string; palette: number }> = [];
+  for (const e of entries) {
+    if (e.stable) continue;
+    const kept = book.get(e.id);
+    if (kept && kept.parity === e.palette % 2 && !inUse.has(kept.first)) inUse.add(kept.first);
+    else fresh.push(e);
+  }
+  if (fresh.length > 0) {
+    const firsts = assignFirstNames(fresh, inUse);
+    for (const e of fresh)
+      book.set(e.id, { first: firsts.get(e.key) ?? '', parity: e.palette % 2 });
+  }
+}
+
 /** The set key of a look (a palette and a hue turn in degrees). */
 export const lookKey = (palette: number, hue: number): string => `${palette}/${hue}`;
 

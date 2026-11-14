@@ -12,7 +12,9 @@ import {
   hashKey,
   lookKey,
   MEN_NAMES,
+  type NameBook,
   pickLook,
+  resolveFirstNames,
   roleFromSlug,
   WOMEN_NAMES,
 } from '../src/aero/names.js';
@@ -112,4 +114,46 @@ test('a look: the key’s own palette with no tint, the next free palette when i
   const turned = pickLook(key, 6, all);
   assert.equal(turned.palette, own.palette);
   assert.equal(turned.hue, 60);
+});
+
+test('resolveFirstNames: stable keys get the same names whatever order they arrive in, even when two want the same name', () => {
+  // Two stable keys whose salted hash starts at the same name.
+  const keys: string[] = [];
+  const startOf = (k: string): string => assignFirstNames([{ key: k, palette: 1 }]).get(k)!;
+  const seen = new Map<string, string>();
+  for (let i = 0; keys.length < 2 && i < 5000; i++) {
+    const k = `floor${i}//slug`;
+    const n = startOf(k);
+    const other = seen.get(n);
+    if (other !== undefined) keys.push(other, k);
+    else seen.set(n, k);
+  }
+  assert.equal(keys.length, 2, 'found two keys that start at one name');
+  const [a, b] = keys.map((key, i) => ({ id: i + 1, key, palette: 1, stable: true }));
+  const together: NameBook = new Map();
+  resolveFirstNames([a!, b!], together);
+  for (const order of [
+    [a!, b!],
+    [b!, a!],
+  ]) {
+    const staggered: NameBook = new Map();
+    resolveFirstNames([order[0]!], staggered);
+    resolveFirstNames(order, staggered);
+    for (const e of [a!, b!]) assert.equal(staggered.get(e.id)!.first, together.get(e.id)!.first);
+  }
+  assert.notEqual(together.get(a!.id)!.first, together.get(b!.id)!.first);
+});
+
+test('resolveFirstNames: a lead keeps its name, and never shares one with a stable key', () => {
+  const book: NameBook = new Map();
+  const lead = { id: 9, key: 'lead/x/0', palette: 1, stable: false };
+  resolveFirstNames([lead], book);
+  const taken = book.get(9)!.first;
+  const person = { id: 1, key: 'p', palette: 1, stable: true };
+  resolveFirstNames([lead, person], book);
+  assert.notEqual(book.get(1)!.first, book.get(9)!.first);
+  const again = book.get(9)!.first;
+  resolveFirstNames([lead, person], book);
+  assert.equal(book.get(9)!.first, again);
+  assert.ok(typeof taken === 'string');
 });
